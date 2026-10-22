@@ -93,7 +93,8 @@ OPENMEET_SERVER=http://127.0.0.1:8787 OPENMEET_GATEWAY_TOKEN='长随机串' npm 
 node --import tsx packages/gateway/scripts/e2e-dialin.ts
 ```
 
-编码策略：优先 Opus/48k（载荷直通、零转码），回退 G.711（μ-law/A-law，Opus↔PCM↔G.711 转码 + 20 ms 混音）。
+信令支持 UDP / TCP / TLS（`OPENMEET_SIP_TRANSPORT`）；编码策略优先 Opus/48k（载荷直通、零转码），
+回退 G.711（μ-law/A-law，Opus↔PCM↔G.711 转码 + 20 ms 混音）。
 H.323 不自研协议栈，经外部 H.323↔SIP 网关落到本网关的 SIP 侧。
 架构、已验证项与**尚未验证项**（真实运营商线路、SIP 注册、RTCP 质量上报、抖动缓冲、视频）见
 [docs/06-互通网关.md](docs/06-互通网关.md)。

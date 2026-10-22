@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { DialInBridge } from './bridge.js';
 
 function required(name: string): string {
@@ -22,6 +23,17 @@ const port = Number(process.env.OPENMEET_SIP_PORT ?? 5060);
 // Where SIP messages go when there is no registrar: normally the PBX/SBC.
 const peer = parsePeer(process.env.OPENMEET_SIP_PEER, bind, port);
 const displayName = process.env.OPENMEET_GATEWAY_DISPLAY_NAME ?? '电话接入';
+const transport = (process.env.OPENMEET_SIP_TRANSPORT ?? 'udp') as 'udp' | 'tcp' | 'tls';
+const tlsKeyPath = process.env.OPENMEET_SIP_TLS_KEY;
+const tlsCertPath = process.env.OPENMEET_SIP_TLS_CERT;
+if (transport === 'tls' && !(tlsKeyPath && tlsCertPath)) {
+  console.error('tls 传输需要 OPENMEET_SIP_TLS_KEY 与 OPENMEET_SIP_TLS_CERT');
+  process.exit(2);
+}
+const tls =
+  transport === 'tls'
+    ? { keyPem: readFileSync(tlsKeyPath as string, 'utf8'), certPem: readFileSync(tlsCertPath as string, 'utf8') }
+    : undefined;
 
 const log = {
   info: (message: string) => console.log(`${new Date().toISOString()} INFO ${message}`),
@@ -34,7 +46,9 @@ await bridge.start({
   uri: process.env.OPENMEET_SIP_URI ?? `sip:openmeet@${bind}:${port}`,
   listenAddress: bind,
   listenPort: port,
-  peer
+  peer,
+  transport,
+  ...(tls ? { tls } : {})
 });
 
 log.info(`OpenMeet 互通网关就绪：服务器 ${serverUrl}，拨入显示名「${displayName}」`);

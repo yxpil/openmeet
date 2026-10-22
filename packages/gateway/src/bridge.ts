@@ -43,7 +43,16 @@ export class DialInBridge {
     this.log = log;
   }
 
-  async start(sip: { uri: string; listenAddress: string; listenPort: number; peer: { address: string; port: number } }): Promise<void> {
+  async start(
+    sip: {
+      uri: string;
+      listenAddress: string;
+      listenPort: number;
+      peer: { address: string; port: number } | null;
+      transport?: 'udp' | 'tcp' | 'tls';
+      tls?: { keyPem: string; certPem: string };
+    }
+  ): Promise<void> {
     if (this.endpoint) return;
     const aorUser = /sip:([^@]+)@/.exec(sip.uri)?.[1] ?? 'openmeet';
     this.endpoint = new SipEndpoint(
@@ -57,7 +66,7 @@ export class DialInBridge {
       (message) => this.log.warn(message)
     );
     await this.endpoint.start();
-    this.log.info(`SIP 监听 ${sip.listenAddress}:${sip.listenPort}`);
+    this.log.info(`SIP/${sip.transport ?? 'UDP'} 监听 ${sip.listenAddress}:${sip.listenPort}`);
   }
 
   /** Owns the dialog: joins the room first, then answers with the real codec. */

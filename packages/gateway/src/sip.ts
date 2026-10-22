@@ -23,14 +23,20 @@ import {
   type RtpTarget
 } from './rtp.js';
 import { extractCallId, rememberCalledNumber, rewriteRequestLine, takeCalledNumber } from './ruri.js';
+import { TcpTransport } from './sip-tcp.js';
 
 export interface SipTransportOptions {
   listenAddress: string;
   listenPort: number;
   /** User part of this UA's address of record; inbound R-URIs are rewritten to it. */
   aorUser?: string;
-  /** Next hop: the PBX, provider or hardphone the gateway speaks SIP with. */
-  peer: RtpTarget;
+  /** Next hop: the PBX, provider or hardphone the gateway speaks SIP with.
+   *  Null for a listen-only gateway whose peers connect to it. */
+  peer: RtpTarget | null;
+  /** Transport family. TLS additionally requires `tls`. */
+  transport?: 'udp' | 'tcp' | 'tls';
+  tls?: { keyPem: string; certPem: string };
+  rejectUnauthorized?: boolean;
 }
 
 /**
@@ -97,7 +103,8 @@ export class UdpTransport {
   }
 
   send(message: string): Promise<void> {
-    const { peer } = this.options;
+    const peer = this.options.peer;
+    if (!peer) return Promise.reject(new Error('没有配置的 SIP 下一跳'));
     return new Promise((resolve, reject) => {
       this.socket.send(Buffer.from(message, 'utf8'), peer.port, peer.address, (error) =>
         error ? reject(error) : resolve()
@@ -436,10 +443,12 @@ export class SipEndpoint {
     this.onError = onError;
     const uri = UserAgent.makeURI(options.uri);
     if (!uri) throw new Error(`无效的 SIP uri: ${options.uri}`);
+    const transportConstructor =
+      options.transport === 'tcp' || options.transport === 'tls' ? TcpTransport : UdpTransport;
     this.userAgent = new UserAgent({
       uri,
       displayName: options.displayName ?? 'OpenMeet',
-      transportConstructor: UdpTransport,
+      transportConstructor,
       transportOptions: options as never,
       sessionDescriptionHandlerFactory: this.createHandlerFactory(),
       logLevel: 'error'
@@ -477,6 +486,13 @@ export class SipEndpoint {
       call?.attach(sdh);
       return sdh;
     };
+  }
+
+  /** 'UDP' | 'TCP' | 'TLS' — what the SIP signalling actually runs over. */
+  get protocol(): string {
+    if (this.options.transport === 'tls') return 'TLS';
+    if (this.options.transport === 'tcp') return 'TCP';
+    return 'UDP';
   }
 
   private logError(message: string): void {

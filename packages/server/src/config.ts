@@ -42,6 +42,8 @@ export interface ServerConfig {
   publicUrl: string | null;
   jwtSecret: string;
   inviteSecret: string;
+  /** Shared bearer the interop gateway presents; empty disables the gateway API. */
+  gatewayToken: string;
   registration: 'open' | 'closed';
   allowGuests: boolean;
   maxParticipants: number;
@@ -101,6 +103,7 @@ export function resolveConfig(partial: PartialConfig = {}): ServerConfig {
     serverName: partial.serverName ?? process.env.OPENMEET_SERVER_NAME ?? 'OpenMeet Server',
     publicUrl: partial.publicUrl ?? (process.env.OPENMEET_PUBLIC_URL || null),
     jwtSecret,
+    gatewayToken: partial.gatewayToken ?? process.env.OPENMEET_GATEWAY_TOKEN ?? '',
     inviteSecret: partial.inviteSecret ?? deriveInviteSecret(jwtSecret),
     registration:
       partial.registration ?? ((process.env.OPENMEET_REGISTRATION ?? 'open') === 'closed' ? 'closed' : 'open'),

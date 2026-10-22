@@ -6,6 +6,8 @@
   "description": "SIP / WebRTC interop gateway for OpenMeet ( signalling bridge, RTP <-> SRTP media bridge, G.711 <-> Opus transcode )",
   "main": "./dist/index.mjs",
   "scripts": {
+    "dev": "tsx watch src/cli.ts",
+    "start": "node dist/cli.mjs",
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts"

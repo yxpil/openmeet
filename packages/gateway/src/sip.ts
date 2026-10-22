@@ -1,5 +1,13 @@
 import { createSocket, type Socket } from 'node:dgram';
-import { Inviter, Invitation, SessionState, UserAgent, type UserAgentDelegate } from 'sip.js';
+import {
+  EmitterImpl,
+  Inviter,
+  Invitation,
+  SessionState,
+  TransportState,
+  UserAgent,
+  type UserAgentDelegate
+} from 'sip.js';
 import {
   buildAudioSdp,
   offeredCodecs,
@@ -14,10 +22,13 @@ import {
   parseTelephoneEvent,
   type RtpTarget
 } from './rtp.js';
+import { extractCallId, rememberCalledNumber, rewriteRequestLine, takeCalledNumber } from './ruri.js';
 
 export interface SipTransportOptions {
   listenAddress: string;
   listenPort: number;
+  /** User part of this UA's address of record; inbound R-URIs are rewritten to it. */
+  aorUser?: string;
   /** Next hop: the PBX, provider or hardphone the gateway speaks SIP with. */
   peer: RtpTarget;
 }
@@ -32,26 +43,45 @@ export class UdpTransport {
   onConnect: (() => void) | undefined;
   onDisconnect: ((error?: Error) => void) | undefined;
   onMessage: ((message: string) => void) | undefined;
+  /** sip.js observes these alongside the onConnect/onDisconnect callbacks. */
+  readonly stateChange = new EmitterImpl<TransportState>();
   private readonly socket: Socket;
   private readonly options: SipTransportOptions;
-  private connected = false;
+  private _state: TransportState = TransportState.Disconnected;
 
   constructor(_logger: unknown, options: SipTransportOptions) {
     this.options = options;
     this.socket = createSocket('udp4');
-    this.socket.on('message', (data) => this.onMessage?.(data.toString('utf8')));
+    this.socket.on('message', (data) => {
+      let text = data.toString('utf8');
+      const aorUser = this.options.aorUser;
+      if (aorUser) {
+        const boundary = text.indexOf('\r\n');
+        const firstLine = boundary < 0 ? text : text.slice(0, boundary);
+        const rewritten = rewriteRequestLine(firstLine, aorUser);
+        if (rewritten.called) {
+          rememberCalledNumber(extractCallId(text), rewritten.called);
+        }
+        if (rewritten.line !== firstLine) text = rewritten.line + text.slice(boundary);
+      }
+      this.onMessage?.(text);
+    });
     this.socket.on('error', (error) => {
-      this.connected = false;
+      this.setState(TransportState.Disconnected);
       this.onDisconnect?.(error);
     });
   }
 
+  get state(): TransportState {
+    return this._state;
+  }
+
   get readyState(): number {
-    return this.connected ? 1 : 0;
+    return this._state === TransportState.Connected ? 1 : 0;
   }
 
   isConnected(): boolean {
-    return this.connected;
+    return this._state === TransportState.Connected;
   }
 
   connect(): Promise<void> {
@@ -59,7 +89,7 @@ export class UdpTransport {
       this.socket.once('error', reject);
       this.socket.bind(this.options.listenPort, this.options.listenAddress, () => {
         this.socket.removeListener('error', reject);
-        this.connected = true;
+        this.setState(TransportState.Connected);
         this.onConnect?.();
         resolve();
       });
@@ -76,12 +106,18 @@ export class UdpTransport {
   }
 
   async disconnect(): Promise<void> {
-    this.connected = false;
+    this.setState(TransportState.Disconnected);
     this.onDisconnect?.();
   }
 
   async dispose(): Promise<void> {
     this.socket.close();
+  }
+
+  private setState(next: TransportState): void {
+    if (this._state === next) return;
+    this._state = next;
+    this.stateChange.emit(next);
   }
 }
 
@@ -115,7 +151,8 @@ export interface SdhEvents {
  * place instead of spread across the dialog code.
  */
 export class GatewaySessionDescriptionHandler {
-  private readonly logger: unknown;
+  /** The sip.js Session (Invitation/Inviter) that owns this handler. */
+  readonly session: unknown;
   private readonly listenAddress: string;
   private readonly events: SdhEvents;
   private endpoint: RtpEndpoint | null = null;
@@ -125,8 +162,8 @@ export class GatewaySessionDescriptionHandler {
   private readonly ssrc = Math.floor(Math.random() * 2 ** 31);
   private closed = false;
 
-  constructor(logger: unknown, options: { listenAddress: string; events?: SdhEvents }) {
-    this.logger = logger;
+  constructor(session: unknown, options: { listenAddress: string; events?: SdhEvents }) {
+    this.session = session;
     this.listenAddress = options.listenAddress;
     this.events = options.events ?? {};
   }
@@ -290,6 +327,7 @@ export interface CallContext {
 export class SipCall {
   private readonly invitation: Invitation | null;
   private readonly inviter: Inviter | null;
+  private attached: GatewaySessionDescriptionHandler | null = null;
   private closed = false;
 
   constructor(invitation: Invitation | null, inviter: Inviter | null) {
@@ -297,7 +335,13 @@ export class SipCall {
     this.inviter = inviter;
   }
 
+  /** Bound by the session description handler factory once sip.js creates it. */
+  attach(handler: GatewaySessionDescriptionHandler): void {
+    this.attached = handler;
+  }
+
   get handler(): GatewaySessionDescriptionHandler | null {
+    if (this.attached) return this.attached;
     const session = this.invitation ?? this.inviter;
     return (session?.sessionDescriptionHandler as GatewaySessionDescriptionHandler) ?? null;
   }
@@ -314,6 +358,12 @@ export class SipCall {
     return this.invitation?.remoteIdentity.uri.user ?? '';
   }
 
+  /** The dialled number, recovered before the transport rewrote the R-URI. */
+  get called(): string {
+    const callId = this.invitation?.request.callId ?? this.inviter?.request.callId;
+    return takeCalledNumber(callId) || this.invitation?.request.ruri?.user || '';
+  }
+
   async accept(): Promise<void> {
     if (!this.invitation) throw new Error('只入呼可以 accept');
     await this.invitation.accept();
@@ -323,8 +373,25 @@ export class SipCall {
     await this.invitation?.progress();
   }
 
+  /**
+   * Refuse the dialog. Once a call is established a rejection is no longer
+   * possible, so it degrades to a BYE instead of throwing inside the caller's
+   * error handler.
+   */
   async reject(statusCode = 488): Promise<void> {
-    await this.invitation?.reject({ statusCode });
+    try {
+      if (this.invitation) {
+        if (this.invitation.state === SessionState.Established || this.invitation.state === SessionState.Establishing) {
+          await this.invitation.bye();
+        } else {
+          await this.invitation.reject({ statusCode });
+        }
+      } else if (this.inviter) {
+        await this.inviter.cancel();
+      }
+    } catch {
+      // the dialog is already gone; nothing further to signal
+    }
   }
 
   async terminate(): Promise<void> {
@@ -343,7 +410,8 @@ export class SipCall {
 }
 
 export interface SipEndpointHandlers {
-  onIncoming?: (call: SipCall) => Promise<'accept' | 'reject'>;
+  /** Must answer the call itself via `call.accept()` or `call.reject()`. */
+  onIncoming?: (call: SipCall) => Promise<void>;
   onDtmf?: (call: SipCall, digit: string) => void;
   onMedia?: (call: SipCall, payload: Uint8Array) => void;
   onEnded?: (call: SipCall) => void;
@@ -352,19 +420,26 @@ export interface SipEndpointHandlers {
 /** SIP user agent for the gateway: answers inbound calls and can dial out. */
 export class SipEndpoint {
   readonly userAgent: UserAgent;
+  private readonly onError: (message: string) => void;
   private readonly options: SipEndpointOptions;
   private readonly handlers: SipEndpointHandlers;
+  private readonly calls = new WeakMap<object, SipCall>();
   private started = false;
 
-  constructor(options: SipEndpointOptions, handlers: SipEndpointHandlers = {}) {
+  constructor(
+    options: SipEndpointOptions,
+    handlers: SipEndpointHandlers = {},
+    onError: (message: string) => void = () => {}
+  ) {
     this.options = options;
     this.handlers = handlers;
+    this.onError = onError;
     const uri = UserAgent.makeURI(options.uri);
     if (!uri) throw new Error(`无效的 SIP uri: ${options.uri}`);
     this.userAgent = new UserAgent({
       uri,
       displayName: options.displayName ?? 'OpenMeet',
-      transportConstructor: UdpTransport as never,
+      transportConstructor: UdpTransport,
       transportOptions: options as never,
       sessionDescriptionHandlerFactory: this.createHandlerFactory(),
       logLevel: 'error'
@@ -372,34 +447,40 @@ export class SipEndpoint {
   }
 
   /**
-   * sip.js builds one handler per dialog; the closure keeps the per-call events
-   * wired to the endpoint callbacks without a global registry.
+   * sip.js creates the media handler lazily, only once the session starts
+   * establishing — which is after `onInvite` returns. It calls the factory with
+   * the Session itself, so registering the call by session object binds events
+   * deterministically without a global registry.
    */
-  private createHandlerFactory(): (logger: unknown, options: unknown) => GatewaySessionDescriptionHandler {
+  private createHandlerFactory(): (session: unknown, options: unknown) => GatewaySessionDescriptionHandler {
     const listenAddress = this.options.listenAddress;
     const handlers = this.handlers;
-    return (logger: unknown) => {
-      const holder: { call?: SipCall } = {};
-      const sdh = new GatewaySessionDescriptionHandler(logger, {
+    const calls = this.calls;
+    return (session: unknown) => {
+      const call = calls.get(session as object);
+      const sdh = new GatewaySessionDescriptionHandler(session, {
         listenAddress,
         events: {
           onRtp: (payload) => {
-            if (holder.call) handlers.onMedia?.(holder.call, payload);
+            if (call) handlers.onMedia?.(call, payload);
           },
           onDtmf: (digit) => {
-            if (holder.call) handlers.onDtmf?.(holder.call, digit);
+            if (call) handlers.onDtmf?.(call, digit);
           }
         }
       });
-      // The call object is created by sip.js right after the handler, so bind lazily.
       const originalClose = sdh.close.bind(sdh);
       sdh.close = () => {
         originalClose();
-        if (holder.call) handlers.onEnded?.(holder.call);
+        if (call) handlers.onEnded?.(call);
       };
-      (sdh as { holder?: typeof holder }).holder = holder;
+      call?.attach(sdh);
       return sdh;
     };
+  }
+
+  private logError(message: string): void {
+    this.onError(message);
   }
 
   async start(): Promise<void> {
@@ -408,14 +489,14 @@ export class SipEndpoint {
     const delegate: UserAgentDelegate = {
       onInvite: (invitation: Invitation) => {
         const call = new SipCall(invitation, null);
-        const holder = (invitation.sessionDescriptionHandler as { holder?: { call: SipCall } })?.holder;
-        if (holder) holder.call = call;
+        this.calls.set(invitation, call);
         void (async () => {
           try {
-            const decision = await (this.handlers.onIncoming?.(call) ?? Promise.resolve<'accept'>('accept'));
-            if (decision === 'accept') await call.accept();
-            else await call.reject(486);
-          } catch {
+            // The handler answers the call itself: a bridge has to join the room
+            // before it can describe the media it will accept.
+            await (this.handlers.onIncoming?.(call) ?? call.reject(486).then(() => 'reject' as const));
+          } catch (error) {
+            this.logError(`处理入呼失败：${error instanceof Error ? error.message : String(error)}`);
             await call.reject(500);
           }
         })();
@@ -426,18 +507,12 @@ export class SipEndpoint {
     await this.userAgent.start();
   }
 
-  /** Attach the call handle to a freshly created handler (outbound path). */
-  bindOutbound(sessionDescriptionHandler: unknown, call: SipCall): void {
-    const holder = (sessionDescriptionHandler as { holder?: { call: SipCall } })?.holder;
-    if (holder) holder.call = call;
-  }
-
   async dial(target: string): Promise<SipCall> {
     const uri = UserAgent.makeURI(target);
     if (!uri) throw new Error(`无效的拨出地址: ${target}`);
     const inviter = new Inviter(this.userAgent, uri);
     const call = new SipCall(null, inviter);
-    this.bindOutbound(inviter.sessionDescriptionHandler, call);
+    this.calls.set(inviter, call);
     await inviter.invite();
     return call;
   }

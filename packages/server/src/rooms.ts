@@ -6,6 +6,7 @@ import {
   PROTOCOL_VERSION,
   WS_CLOSE,
   generateRoomCode,
+  normalizeDialIn,
   normalizeRoomCode,
   parseClientMessage
 } from '@openmeet/shared';
@@ -36,6 +37,8 @@ export interface RoomOptions {
   password?: string;
   lobby?: boolean;
   maxParticipants?: number;
+  /** SIP/PSTN number that reaches this room; omitted means no dial-in. */
+  dialIn?: string;
 }
 
 interface LiveRoom {
@@ -144,6 +147,12 @@ export class RoomManager {
       api(400, 'invalidRequest', '房间密码长度必须为 4–64 个字符');
     }
     const passwordHash = password ? await hashPassword(password) : null;
+    let dialIn: string | null = null;
+    if (options.dialIn !== undefined && options.dialIn !== '') {
+      dialIn = normalizeDialIn(options.dialIn);
+      if (!dialIn) api(400, 'invalidRequest', '拨入号码只能包含数字、可选的 + 前缀与字母，长度 3–32');
+      if (this.db.dialInExists(dialIn)) api(409, 'dialInTaken', '该拨入号码已被其它会议占用');
+    }
 
     const id = `r_${randomUUID()}`;
     let code = '';
@@ -165,7 +174,8 @@ export class RoomManager {
       passwordHash,
       lobby,
       maxParticipants,
-      createdAt
+      createdAt,
+      dialIn
     });
 
     const room: LiveRoom = {
@@ -179,6 +189,7 @@ export class RoomManager {
         maxParticipants,
         hostPeerId: null,
         createdAt,
+        dialIn,
         status: 'active'
       },
       hostUserId,
@@ -193,7 +204,9 @@ export class RoomManager {
     this.rooms.set(id, room);
     this.byCode.set(code, room);
     this.scheduleEmptyRoom(room);
-    this.logger.info(`Room ${room.view.code} created (${kind}, lobby=${lobby}, max=${maxParticipants})`);
+    this.logger.info(
+      `Room ${room.view.code} created (${kind}, lobby=${lobby}, max=${maxParticipants}${dialIn ? `, dial-in=${dialIn}` : ''})`
+    );
 
     const sid = randomUUID();
     const ticket = this.issueTicket(room, {
@@ -300,6 +313,35 @@ export class RoomManager {
 
     const sid = randomUUID();
     const ticket = this.issueTicket(room, { sid, userId: null, name, guest: true, host: false });
+    return {
+      ticket,
+      room: this.viewOf(room),
+      self: { userId: null, displayName: name, guest: true, host: false },
+      ice: this.ice.getIceConfig({ userId: null, sid })
+    };
+  }
+
+  /**
+   * Turn a dialled number into a join ticket for the interop gateway.
+   * The gateway is trusted infrastructure (shared bearer token), so it skips the
+   * room password, but lock, capacity and lobby admission still apply.
+   */
+  resolveDialIn(number: string, displayName: string): JoinResponse {
+    if (!this.config.gatewayToken) {
+      api(403, 'gatewayUnauthorized', '服务器未配置 OPENMEET_GATEWAY_TOKEN，网关接口不可用');
+    }
+    const dialIn = normalizeDialIn(number);
+    if (!dialIn) api(400, 'invalidRequest', '拨入号码格式不正确');
+    const roomId = this.db.activeRoomIdByDialIn(dialIn);
+    const room = roomId ? this.rooms.get(roomId) : undefined;
+    if (!room || room.ended) api(404, 'roomNotFound', '没有会议使用该拨入号码，或会议已结束');
+    if (room.view.locked) api(403, 'roomLocked', '会议已锁定，不接受外部拨入');
+    if (room.peers.size >= room.view.maxParticipants) api(409, 'roomFull', '会议人数已满');
+
+    const name = normalizeDisplayName(displayName, '电话接入');
+    const sid = randomUUID();
+    const ticket = this.issueTicket(room, { sid, userId: null, name, guest: true, host: false });
+    this.logger.info(`Dial-in ${dialIn} resolved to room ${room.view.code}`);
     return {
       ticket,
       room: this.viewOf(room),

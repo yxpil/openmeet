@@ -17,7 +17,8 @@ import { makeRtpPacket } from './rtp.js';
 
 export interface ParticipantOptions {
   serverUrl: string;
-  roomCode: string;
+  /** Required for the HTTP join path; unused when a ticket was minted elsewhere. */
+  roomCode?: string;
   displayName: string;
   password?: string;
   inviteToken?: string;
@@ -78,8 +79,30 @@ export class RoomParticipant {
     return participant;
   }
 
+  /**
+   * Enter a room with a ticket the server already minted — the dial-in path,
+   * where /api/gateway/resolve decided the room and the join credentials.
+   */
+  static withTicket(
+    options: Pick<ParticipantOptions, 'serverUrl' | 'displayName' | 'accessToken'>,
+    ticket: string,
+    events: ParticipantEvents = {}
+  ): RoomParticipant {
+    const participant = new RoomParticipant(options, events);
+    participant.beginWithTicket(ticket);
+    return participant;
+  }
+
+  private beginWithTicket(ticket: string): void {
+    if (this.started) return;
+    this.started = true;
+    this.ticket = ticket;
+    this.openSocket();
+  }
+
   private async start(): Promise<void> {
     if (this.started) return;
+    if (!this.options.roomCode) throw new Error('加入房间需要房间号');
     this.started = true;
     const url = `${this.options.serverUrl.replace(/\/$/, '')}/api/rooms/${encodeURIComponent(this.options.roomCode)}/join`;
     const response = await fetch(url, {
@@ -109,10 +132,10 @@ export class RoomParticipant {
     this.ticket = accepted.ticket;
     this.ice = accepted.ice;
     this.room = accepted.room;
-    this.openSocket(accepted);
+    this.openSocket();
   }
 
-  private openSocket(join: JoinResponse): void {
+  private openSocket(): void {
     if (this.closed) return;
     const socket = new WebSocket(makeWsUrl(this.options.serverUrl));
     this.ws = socket;
@@ -120,7 +143,7 @@ export class RoomParticipant {
       this.send({ type: 'hello', v: 1, ticket: this.ticket ?? '' });
       this.startPing();
     });
-    socket.on('message', (data) => this.onMessage(String(data), join));
+    socket.on('message', (data) => this.onMessage(String(data)));
     socket.on('close', () => {
       if (!this.closed) this.events.onFatal?.('信令连接已断开');
     });
@@ -140,7 +163,7 @@ export class RoomParticipant {
     this.ws.send(JSON.stringify(message));
   }
 
-  private onMessage(raw: string, join: JoinResponse): void {
+  private onMessage(raw: string): void {
     let message: ServerMessage;
     try {
       message = JSON.parse(raw) as ServerMessage;
@@ -161,7 +184,7 @@ export class RoomParticipant {
         this.ensurePeers(message.participants);
         break;
       case 'peer.join':
-        this.events.onRoom?.(this.room ?? join.room, [message.peer]);
+        if (this.room) this.events.onRoom?.(this.room, [message.peer]);
         this.ensurePeer(message.peer);
         break;
       case 'peer.leave':

@@ -94,6 +94,12 @@ export default function InviteDialog({ open, onClose }: InviteDialogProps): Reac
             </div>
           )}
           {room.lobby && <div className="invite-note">房间启用了等候室，新成员需要主持者准入。</div>}
+          {room.dialIn && (
+            <div className="invite-note">
+              电话拨入：<strong>{room.dialIn}</strong>
+              （经互通网关；号码对本服务器内所有会议唯一）
+            </div>
+          )}
         </div>
 
         {text ? (

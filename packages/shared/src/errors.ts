@@ -22,7 +22,9 @@ export const ERROR_CODES = {
   internalError: 'internal_error',
   protocolError: 'protocol_error',
   notAdmitted: 'not_admitted',
-  unknownPeer: 'unknown_peer'
+  unknownPeer: 'unknown_peer',
+  dialInTaken: 'dial_in_taken',
+  gatewayUnauthorized: 'gateway_unauthorized'
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

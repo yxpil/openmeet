@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -192,6 +192,20 @@ function optionalInteger(body: Record<string, unknown>, key: string): number | u
     throw new ApiError(400, ERROR_CODES.invalidRequest, `${key} 必须是整数`);
   }
   return value;
+}
+
+/** The gateway is infrastructure, so it authenticates with a shared bearer token. */
+function requireGatewayToken(req: IncomingMessage, config: ServerConfig): void {
+  const configured = config.gatewayToken;
+  const provided = req.headers['x-openmeet-gateway'];
+  if (!configured || typeof provided !== 'string') {
+    throw new ApiError(401, ERROR_CODES.gatewayUnauthorized, '网关凭据无效');
+  }
+  const expected = Buffer.from(configured, 'utf8');
+  const actual = Buffer.from(provided, 'utf8');
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    throw new ApiError(401, ERROR_CODES.gatewayUnauthorized, '网关凭据无效');
+  }
 }
 
 function bearerToken(req: IncomingMessage): string | null {
@@ -467,13 +481,25 @@ export function createHttpServer(deps: HttpDeps): {
         }
         const lobby = optionalBoolean(body, 'lobby');
         const maxParticipants = optionalInteger(body, 'maxParticipants');
+        const dialIn = optionalString(body, 'dialIn', 32) ?? '';
         const response = await manager.createRoomForUser(user, {
           title,
           password,
           lobby,
-          maxParticipants
+          maxParticipants,
+          dialIn
         });
         sendJson(res, 201, response);
+        return;
+      }
+
+      if (req.method === 'POST' && path === '/api/gateway/resolve') {
+        if (config.mode === 'lan') throw new ApiError(403, ERROR_CODES.lanMode, '局域网模式不提供网关接口');
+        requireGatewayToken(req, config);
+        const body = await readJsonBody(req);
+        const number = requiredString(body, 'number', 3, 32);
+        const displayName = optionalString(body, 'displayName', 40) ?? '电话接入';
+        sendJson(res, 200, manager.resolveDialIn(number, displayName));
         return;
       }
 

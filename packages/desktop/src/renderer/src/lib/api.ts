@@ -131,6 +131,8 @@ export interface CreateRoomInput {
   password?: string;
   lobby?: boolean;
   maxParticipants?: number;
+  /** Ask the operator to route this phone number into the room (needs a gateway). */
+  dialIn?: string;
 }
 
 export function createRoom(

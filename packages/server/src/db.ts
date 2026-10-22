@@ -29,6 +29,7 @@ export interface CreateRoomRecord {
   lobby: boolean;
   maxParticipants: number;
   createdAt: number;
+  dialIn?: string | null;
 }
 
 type Row = Record<string, unknown>;
@@ -110,6 +111,13 @@ const MIGRATIONS: { version: number; sql: string }[] = [
       CREATE INDEX idx_participants_room ON room_participants(room_id, joined_at);
       CREATE INDEX idx_participants_user ON room_participants(user_id, joined_at DESC);
       CREATE INDEX idx_refresh_user ON refresh_tokens(user_id, expires_at);
+    `
+  },
+  {
+    version: 2,
+    sql: `
+      ALTER TABLE rooms ADD COLUMN dial_in TEXT;
+      CREATE UNIQUE INDEX idx_rooms_dial_in ON rooms(dial_in) WHERE dial_in IS NOT NULL;
     `
   }
 ];
@@ -259,8 +267,8 @@ export class AppDatabase {
     this.db
       .prepare(
         `INSERT INTO rooms
-          (id, code, title, host_user_id, password_hash, lobby, max_participants, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, code, title, host_user_id, password_hash, lobby, max_participants, created_at, dial_in)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         input.id,
@@ -270,8 +278,23 @@ export class AppDatabase {
         input.passwordHash,
         input.lobby ? 1 : 0,
         input.maxParticipants,
-        input.createdAt
+        input.createdAt,
+        input.dialIn ?? null
       );
+  }
+
+  dialInExists(dialIn: string): boolean {
+    const row = this.db
+      .prepare(`SELECT 1 AS found FROM rooms WHERE dial_in = ? AND status = 'active'`)
+      .get(dialIn) as Row | undefined;
+    return Boolean(row);
+  }
+
+  activeRoomIdByDialIn(dialIn: string): string | null {
+    const row = this.db
+      .prepare(`SELECT id FROM rooms WHERE dial_in = ? AND status = 'active'`)
+      .get(dialIn) as Row | undefined;
+    return row ? String(row.id ?? '') : null;
   }
 
   roomCodeExists(code: string): boolean {

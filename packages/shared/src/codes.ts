@@ -29,8 +29,7 @@ export function normalizeServerUrl(input: string): string | null {
   }
 }
 
-export function normalizeLanEndpoint(input: string): string | null {
-  try {
+export function normalizeLanEndpoint(input: string): string | null {  try {
     const url = new URL(input.trim());
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
     if (url.username || url.password) return null;
@@ -48,4 +47,17 @@ export function makeWsUrl(baseUrl: string): string {
   url.search = '';
   url.hash = '';
   return url.toString();
+}
+
+/**
+ * Canonicalise a dial-in number: digits, an optional leading +, and letters for
+ * vanity extensions. Human formatting (spaces, dashes, dots, parentheses) is
+ * stripped so a number pasted off a business card works, while anything a phone
+ * cannot dial is rejected and never becomes an unreachable room.
+ */
+export function normalizeDialIn(input: string | null | undefined): string | null {
+  if (typeof input !== 'string') return null;
+  const stripped = input.toUpperCase().replace(/[\s().-]/g, '');
+  if (!/^\+?[0-9A-Z]{3,32}$/.test(stripped)) return null;
+  return stripped;
 }

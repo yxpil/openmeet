@@ -103,10 +103,7 @@ describe('codec selection', () => {
 });
 
 describe('SIP dialog with the gateway', () => {
-  it(
-    'answers an INVITE, carries G.711 both ways, sees DTMF, and observes BYE',
-    { skip: 'sip.js 会话生命周期接线尚未完成：onIncoming 时 sessionDescriptionHandler 还未挂载' },
-    async () => {
+  it('answers an INVITE, carries G.711 both ways, sees DTMF, and observes BYE', async () => {
     const gatewayPort = 5090;
     const phoneSipPort = 5091;
     const media = new PhoneMedia();
@@ -116,10 +113,6 @@ describe('SIP dialog with the gateway', () => {
     const digits: string[] = [];
     let ended = false;
     let caller = '';
-    let answerSent: ((port: number) => void) | null = null;
-    const answered = new Promise<number>((resolve) => {
-      answerSent = resolve;
-    });
 
     const calls: SipCall[] = [];
     const gateway = new SipEndpoint(
@@ -133,9 +126,7 @@ describe('SIP dialog with the gateway', () => {
         onIncoming: async (call) => {
           calls.push(call);
           caller = call.caller;
-          const port = call.handler?.port ?? 0;
-          answerSent?.(port);
-          return 'accept';
+          await call.accept();
         },
         onMedia: (_call, payload) => inbound.push(payload),
         onDtmf: (_call, digit) => digits.push(digit),
@@ -168,10 +159,13 @@ describe('SIP dialog with the gateway', () => {
     const inviter = new Inviter(phone, UserAgent.makeURI(`sip:gateway@127.0.0.1:${gatewayPort}`)!);
     await inviter.invite();
 
-    const gatewayMediaPort = await Promise.race([
-      answered,
-      settle(3000).then(() => 0)
-    ]);
+    // sip.js only builds the media handler once the session starts establishing,
+    // so the gateway's RTP port appears shortly after the INVITE is accepted.
+    let gatewayMediaPort = 0;
+    for (let attempt = 0; attempt < 30 && !gatewayMediaPort; attempt += 1) {
+      await settle(100);
+      gatewayMediaPort = calls[0]?.handler?.port ?? 0;
+    }
     try {
       assert.ok(gatewayMediaPort > 0, 'gateway never reported its RTP port');
       assert.equal(caller, 'caller');
@@ -183,7 +177,13 @@ describe('SIP dialog with the gateway', () => {
       media.sendPayloadType(pcmToUlaw(samples), 0);
       await settle(300);
       assert.equal(inbound.length, 2);
-      assert.deepEqual([...ulawToPcm(inbound[0]!)], [...samples]);
+      // μ-law is lossy: 1000 lands on the segment-3 code 988 (step 64), so assert
+      // within half a step instead of exact equality.
+      const decoded = ulawToPcm(inbound[0]!);
+      assert.equal(decoded.length, samples.length);
+      for (const value of decoded) {
+        assert.ok(Math.abs(value - 1000) <= 32, `μ-law round-trip drifted to ${value}`);
+      }
 
       // phone -> gateway: DTMF '7' as RFC 2833
       media.sendPayloadType(Buffer.from([7, 0x0a, 0x00, 0x08]), 101);

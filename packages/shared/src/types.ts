@@ -21,6 +21,8 @@ export interface RoomView {
   maxParticipants: number;
   hostPeerId: string | null;
   createdAt: number;
+  /** SIP/PSTN number that reaches this room, when the operator enabled dial-in. */
+  dialIn?: string | null;
   status: 'active';
 }
 

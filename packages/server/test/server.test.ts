@@ -34,9 +34,9 @@ function codeOf(result: ApiResult): string | undefined {
 async function api(
   port: number,
   path: string,
-  options: { method?: string; token?: string; body?: unknown } = {}
+  options: { method?: string; token?: string; body?: unknown; headers?: Record<string, string> } = {}
 ): Promise<ApiResult> {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...(options.headers ?? {}) };
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -173,6 +173,7 @@ describe('OpenMeet server', () => {
       dataDir,
       dbPath: join(dataDir, 'test.db'),
       jwtSecret: 'test-secret-'.repeat(6),
+      gatewayToken: 'gateway-test-token',
       registration: 'open',
       allowGuests: true,
       stunUrls: [],
@@ -400,6 +401,84 @@ describe('OpenMeet server', () => {
       bad.close();
       setTimeout(resolve, 50);
     });
+  });
+
+  it('creates a dial-in room and hands the gateway a join ticket', async () => {
+    const created = await api(port, '/api/rooms', {
+      method: 'POST',
+      token: alice.accessToken,
+      body: { title: '电话可拨入', dialIn: '+86 21 555 0100' }
+    });
+    assert.equal(created.status, 201);
+    const room = created.body.room as { code: string; dialIn?: string | null };
+    assert.equal(room.dialIn, '+86215550100');
+
+    const resolved = await api(port, '/api/gateway/resolve', {
+      method: 'POST',
+      headers: { 'x-openmeet-gateway': 'gateway-test-token' },
+      body: { number: '+86215550100', displayName: '电话接入' }
+    });
+    assert.equal(resolved.status, 200);
+    const join = resolved.body as unknown as JoinResponse;
+    assert.equal(join.room.code, room.code);
+    assert.equal(join.self.displayName, '电话接入');
+    assert.ok(join.ticket);
+
+    // the ticket behaves like any guest join: it reaches welcome over WS
+    const client = await WsClient.connect(port);
+    const hello = await welcome(client, port, join.ticket);
+    assert.equal(hello.self.name, '电话接入');
+    assert.equal(hello.room.code, room.code);
+    client.close();
+  });
+
+  it('refuses gateway resolve without the shared token, and unknown numbers', async () => {
+    const anonymous = await api(port, '/api/gateway/resolve', {
+      method: 'POST',
+      body: { number: '+86215550100' }
+    });
+    assert.equal(anonymous.status, 401);
+    assert.equal(codeOf(anonymous), 'gateway_unauthorized');
+
+    const wrong = await api(port, '/api/gateway/resolve', {
+      method: 'POST',
+      headers: { 'x-openmeet-gateway': 'nope-not-this-token' },
+      body: { number: '+86215550100' }
+    });
+    assert.equal(wrong.status, 401);
+
+    const unknown = await api(port, '/api/gateway/resolve', {
+      method: 'POST',
+      headers: { 'x-openmeet-gateway': 'gateway-test-token' },
+      body: { number: '0000000' }
+    });
+    assert.equal(unknown.status, 404);
+    assert.equal(codeOf(unknown), 'room_not_found');
+  });
+
+  it('rejects a dial-in number already used by a live room and malformed numbers', async () => {
+    const first = await api(port, '/api/rooms', {
+      method: 'POST',
+      token: alice.accessToken,
+      body: { title: '独占号码', dialIn: '9000' }
+    });
+    assert.equal(first.status, 201);
+
+    const clash = await api(port, '/api/rooms', {
+      method: 'POST',
+      token: alice.accessToken,
+      body: { title: '重复号码', dialIn: '9000' }
+    });
+    assert.equal(clash.status, 409);
+    assert.equal(codeOf(clash), 'dial_in_taken');
+
+    const malformed = await api(port, '/api/rooms', {
+      method: 'POST',
+      token: alice.accessToken,
+      body: { title: '非法号码', dialIn: '12' }
+    });
+    assert.equal(malformed.status, 400);
+    assert.equal(codeOf(malformed), 'invalid_request');
   });
 
   it('ends a room when the host ends it', async () => {

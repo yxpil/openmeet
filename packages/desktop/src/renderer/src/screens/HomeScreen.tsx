@@ -72,6 +72,7 @@ export default function HomeScreen(): React.JSX.Element {
   const [password, setPassword] = useState('');
   const [lobby, setLobby] = useState(false);
   const [maxParticipants, setMaxParticipants] = useState(8);
+  const [dialIn, setDialIn] = useState('');
   const [hostName, setHostName] = useState(profileName);
   const [joinCode, setJoinCode] = useState('');
   const [inviteText, setInviteText] = useState('');
@@ -104,6 +105,7 @@ export default function HomeScreen(): React.JSX.Element {
     setMaxParticipants(8);
     setJoinCode('');
     setInviteText('');
+    setDialIn('');
   };
 
   const openDialog = (kind: DialogKind) => {
@@ -127,7 +129,8 @@ export default function HomeScreen(): React.JSX.Element {
           title: normalizedTitle,
           ...(password ? { password } : {}),
           lobby,
-          maxParticipants
+          maxParticipants,
+          ...(dialIn.trim() ? { dialIn: dialIn.trim() } : {})
         },
         {
           token: session.accessToken,
@@ -493,6 +496,18 @@ export default function HomeScreen(): React.JSX.Element {
                     minLength={4}
                     maxLength={64}
                   />
+                </label>
+                <label className="field">
+                  <span className="field-label">电话拨入号码（可选）</span>
+                  <input
+                    value={dialIn}
+                    onChange={(event) => setDialIn(event.target.value)}
+                    placeholder="+86215550100 或 9000"
+                    maxLength={32}
+                  />
+                  <span className="field-hint">
+                    需要管理员部署互通网关后电话才能打进来；没有网关时留空。
+                  </span>
                 </label>
                 <div className="form-row">
                   <label className="field">

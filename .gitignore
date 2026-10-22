@@ -1,0 +1,11 @@
+node_modules/
+dist/
+out/
+release/
+*.log
+data/
+.env
+.DS_Store
+Thumbs.db
+.playwright/
+*.tsbuildinfo

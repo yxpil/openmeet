@@ -1,0 +1,28 @@
+services:
+  openmeet:
+    build: .
+    image: openmeet/server:0.1.0
+    restart: unless-stopped
+    ports:
+      - '8787:8787'
+      # 仅在启用内嵌 TURN 桥接时需要
+      # - '3478:3478/udp'
+    environment:
+      OPENMEET_SERVER_NAME: 'OpenMeet Server'
+      # 首次注册创建管理员账号后建议改为 closed
+      OPENMEET_REGISTRATION: 'open'
+      OPENMEET_ALLOW_GUESTS: 'true'
+      OPENMEET_LOG_LEVEL: 'info'
+      # 生产部署请显式设置，留空则首次启动自动生成并保存到数据目录
+      # 邀请令牌密钥由该密钥派生，无需单独配置
+      # OPENMEET_JWT_SECRET: 'change-me'
+      # TURN 桥接：off / embedded / coturn
+      # OPENMEET_TURN_MODE: 'embedded'
+      # OPENMEET_TURN_PUBLIC_HOST: 'turn.example.org'
+      # OPENMEET_TURN_USERNAME: 'openmeet'
+      # OPENMEET_TURN_PASSWORD: 'change-me'
+    volumes:
+      - openmeet-data:/var/lib/openmeet
+
+volumes:
+  openmeet-data:

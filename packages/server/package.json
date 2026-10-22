@@ -1,0 +1,28 @@
+{
+  "name": "@openmeet/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hostable OpenMeet server: accounts, rooms, WebRTC signaling and optional TURN bridge",
+  "main": "./dist/index.mjs",
+  "scripts": {
+    "dev": "tsx watch src/cli.ts",
+    "build": "node scripts/build.mjs",
+    "start": "node dist/index.mjs",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openmeet/shared": "0.1.0",
+    "ws": "^8.22.0"
+  },
+  "optionalDependencies": {
+    "node-turn": "^0.0.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.0",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.27.0",
+    "tsx": "^4.23.15"
+  }
+}

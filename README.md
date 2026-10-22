@@ -64,6 +64,7 @@ npm test                 # 服务端集成测试
 packages/
   shared/    协议与类型的单一来源：房间、消息、邀请编解码、房间码规则
   server/    自托管服务端：账号、房间、信令、LAN 模式、可选 TURN
+  gateway/   互通网关：SIP 信令、RTP↔SRTP 媒体桥、G.711↔Opus、房间参与者
   desktop/   Electron 客户端：主进程 + 预加载 + React 渲染层
 docs/
   01-概要设计.md      目标、组件划分、网络拓扑、技术选型
@@ -71,6 +72,25 @@ docs/
   03-接口规范.md      HTTP / WebSocket / IPC / 邀请格式契约
   04-数据模型.md      SQLite 表结构、令牌与历史存储
   05-部署与运维.md    环境变量、反向代理、TURN、备份与排障
+  06-互通网关.md      SIP/H.323 接入架构、编码策略、验证状态清单
+```
+
+## SIP / H.323 互通（进行中）
+
+新增 `packages/gateway`：让电话终端与会议系统接入 OpenMeet 房间。网关以**普通参与者**身份入会，
+受同样的密码、等候室、锁定与主持者权限约束，服务端与客户端行为不变。
+
+已验证：网关与 Chromium 真实 WebRTC 栈双向媒体互通、网关加入真实房间并收发音频、
+Node 上的 SIP/UDP 事务、G.711 与 Opus↔G.711 全链路（含频域断言）。
+
+**尚未完成：SIP 入呼接通**（sip.js 会话生命周期接线问题，测试以 `skip` 标注原因保留）。
+H.323 不自研协议栈，按业界通行方式经外部 H.323↔SIP 网关落到本网关的 SIP 侧。
+
+架构、编码策略、验证与未验证清单见 [docs/06-互通网关.md](docs/06-互通网关.md)。
+
+```bash
+npm run build:gateway
+node packages/gateway/scripts/e2e-bridge.mjs   # 自建临时环境跑全链路验证
 ```
 
 ## 已知边界

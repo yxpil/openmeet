@@ -11,12 +11,15 @@
   "scripts": {
     "dev:server": "npm run dev --workspace @openmeet/server",
     "dev:desktop": "npm run dev --workspace @openmeet/desktop",
-    "build": "npm run build:server && npm run build:desktop",
+    "dev:gateway": "npm run dev --workspace @openmeet/gateway",
+    "build": "npm run build:server && npm run build:desktop && npm run build:gateway",
     "build:server": "npm run build --workspace @openmeet/server",
     "build:desktop": "npm run build --workspace @openmeet/desktop",
+    "build:gateway": "npm run build --workspace @openmeet/gateway",
     "start:server": "npm run start --workspace @openmeet/server",
-    "test": "npm test --workspace @openmeet/server",
-    "typecheck": "npm run typecheck --workspace @openmeet/server && npm run typecheck --workspace @openmeet/desktop",
+    "start:gateway": "npm run start --workspace @openmeet/gateway",
+    "test": "npm test --workspace @openmeet/server && npm test --workspace @openmeet/gateway",
+    "typecheck": "npm run typecheck --workspace @openmeet/server && npm run typecheck --workspace @openmeet/desktop && npm run typecheck --workspace @openmeet/gateway",
     "package:win": "npm run package:win --workspace @openmeet/desktop"
   },
   "engines": {

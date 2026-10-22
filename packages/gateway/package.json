@@ -1,0 +1,27 @@
+{
+  "name": "@openmeet/gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "SIP / WebRTC interop gateway for OpenMeet ( signalling bridge, RTP <-> SRTP media bridge, G.711 <-> Opus transcode )",
+  "main": "./dist/index.mjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@openmeet/shared": "0.1.0",
+    "opusscript": "^0.1.1",
+    "sip.js": "^0.21.2",
+    "werift": "^0.25.1",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.0",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.27.0",
+    "tsx": "^4.23.15"
+  },
+  "exports": "./dist/index.mjs"
+}

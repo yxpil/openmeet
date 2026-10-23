@@ -124,6 +124,40 @@ export interface ScreenSource {
   displayId: string;
 }
 
+/** A planned auto-join as stored locally; the password never leaves the main process. */
+export interface ScheduledJoinRecord {
+  id: string;
+  serverUrl: string;
+  roomCode: string;
+  roomTitle: string;
+  displayName: string;
+  at: number;
+  createdAt: number;
+  hasPassword: boolean;
+  passwordFormat: 'safeStorage-v1' | 'plain-v0';
+}
+
+export interface ScheduledJoinInput extends ScheduledJoinRecord {
+  password?: string;
+}
+
+export interface ScheduledCreateInput {
+  serverUrl: string;
+  roomCode: string;
+  roomTitle?: string;
+  displayName: string;
+  at: number;
+  password?: string;
+}
+
+/** Payload pushed to the renderer when a plan fires or needs attention. */
+export interface ScheduledJoinEvent extends ScheduledJoinRecord {
+  /** Only on `scheduled:join`: the room password, decrypted at fire time. */
+  password?: string;
+  /** Present only when the plan could not be stored encrypted. */
+  passwordUnavailable?: boolean;
+}
+
 export interface OpenMeetBridge {
   appInfo(): Promise<AppInfo>;
   windowMinimize(): void;
@@ -151,6 +185,12 @@ export interface OpenMeetBridge {
   screenSelect(sourceId: string): Promise<void>;
   clipboardWrite(text: string): Promise<void>;
   openExternal(url: string): Promise<void>;
+  scheduledList(): Promise<ScheduledJoinRecord[]>;
+  scheduledCreate(input: ScheduledCreateInput): Promise<ScheduledJoinRecord>;
+  scheduledCancel(id: string): Promise<void>;
+  onScheduledJoin(callback: (event: ScheduledJoinEvent) => void): () => void;
+  onScheduledReminder(callback: (event: ScheduledJoinEvent) => void): () => void;
+  onScheduledMissed(callback: (event: ScheduledJoinEvent) => void): () => void;
   onDeepLink(callback: (url: string) => void): () => void;
   onWindowState(callback: (state: { maximized: boolean }) => void): () => void;
 }
@@ -182,6 +222,12 @@ export const IPC = {
   screenSelect: 'screen:select',
   clipboardWrite: 'clipboard:write',
   openExternal: 'shell:openExternal',
+  scheduledList: 'scheduled:list',
+  scheduledCreate: 'scheduled:create',
+  scheduledCancel: 'scheduled:cancel',
+  scheduledJoin: 'scheduled:join',
+  scheduledReminder: 'scheduled:reminder',
+  scheduledMissed: 'scheduled:missed',
   deepLink: 'deep-link',
   windowState: 'window:state'
 } as const;

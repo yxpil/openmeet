@@ -86,6 +86,8 @@ export default function PrejoinScreen(): React.JSX.Element {
   const [displayName, setDisplayName] = useState(() => {
     if (intent?.source === 'server-host') return intent.join.self.displayName;
     if (intent?.source === 'lan-host') return intent.lan.self.displayName;
+    // A scheduled plan carries the name the user picked when booking it.
+    if (intent?.source === 'server-code' && intent.displayName) return intent.displayName;
     if (intent?.kind === 'server' && session && session.serverUrl === intent.serverUrl) {
       return session.user.displayName;
     }
@@ -102,11 +104,14 @@ export default function PrejoinScreen(): React.JSX.Element {
   const [mediaNote, setMediaNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
+  const [devicesReady, setDevicesReady] = useState(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const handedOffRef = useRef(false);
   const mountedRef = useRef(true);
+  const autoJoinFiredRef = useRef(false);
+  const autoJoinRef = useRef<(() => void) | null>(null);
   const micIdRef = useRef(micId);
   const cameraIdRef = useRef(cameraId);
   micIdRef.current = micId;
@@ -187,6 +192,7 @@ export default function PrejoinScreen(): React.JSX.Element {
         setMediaNote(`无法访问${failures.join('和')}，你仍然可以加入会议。`);
       }
       await refreshDevices();
+      if (!cancelled) setDevicesReady(true);
     };
 
     void setup();
@@ -202,6 +208,14 @@ export default function PrejoinScreen(): React.JSX.Element {
     // Media is prepared once; later device changes are applied incrementally.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const autoJoin = intent?.source === 'server-code' && intent.autoJoin === true;
+
+  useEffect(() => {
+    if (!devicesReady || !autoJoin || autoJoinFiredRef.current) return;
+    autoJoinFiredRef.current = true;
+    autoJoinRef.current?.();
+  }, [devicesReady, autoJoin]);
 
   const toggleMic = async () => {
     const next = !micOn;
@@ -370,6 +384,8 @@ export default function PrejoinScreen(): React.JSX.Element {
       setJoining(false);
     }
   };
+
+  autoJoinRef.current = () => void handleJoin();
 
   const hasVideo = Boolean(stream?.getVideoTracks().length) && cameraOn;
 

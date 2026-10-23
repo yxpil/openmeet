@@ -8,8 +8,10 @@ import {
   Globe2,
   History,
   Home,
+  Hourglass,
   LayoutGrid,
   Loader2,
+  Lock,
   LogIn,
   LogOut,
   MessageSquare,
@@ -33,10 +35,47 @@ import type { InvitePayload } from '@openmeet/shared';
 import { useAppStore } from '../store/app';
 import { ApiRequestError, createRoom } from '../lib/api';
 import type { MeetingRecord } from '../../../shared/ipc';
-import { formatDateTime, formatDuration, initials, avatarColors, roomLink, shortServer } from '../lib/format';
+import {
+  avatarColors,
+  combineDateTime,
+  defaultScheduleWhen,
+  formatDateTime,
+  formatDuration,
+  formatRemaining,
+  initials,
+  localDateString,
+  roomLink,
+  shortServer
+} from '../lib/format';
 import BrandMark from '../components/BrandMark';
 
-type DialogKind = 'create' | 'join' | 'lan' | 'invite' | null;
+type DialogKind = 'create' | 'join' | 'lan' | 'invite' | 'schedule' | null;
+
+type DialogMode = Exclude<DialogKind, null>;
+
+const DIALOG_ICON: Record<DialogMode, React.ComponentType<{ size?: number }>> = {
+  create: Video,
+  lan: Wifi,
+  join: DoorOpen,
+  invite: Copy,
+  schedule: CalendarClock
+};
+
+const DIALOG_EYEBROW: Record<DialogMode, string> = {
+  create: '服务器会议',
+  lan: '本机直连',
+  join: '房间号加入',
+  invite: '邀请加入',
+  schedule: '预约自动入会'
+};
+
+const DIALOG_TITLE: Record<DialogMode, string> = {
+  create: '发起会议',
+  lan: '发起局域网会议',
+  join: '加入会议',
+  invite: '粘贴邀请',
+  schedule: '定时入会'
+};
 
 function errorText(error: unknown): string {
   if (error instanceof ApiRequestError || error instanceof Error) return error.message;
@@ -63,6 +102,10 @@ export default function HomeScreen(): React.JSX.Element {
   const openInviteText = useAppStore((state) => state.openInviteText);
   const openServerJoin = useAppStore((state) => state.openServerJoin);
   const toast = useAppStore((state) => state.toast);
+  const scheduled = useAppStore((state) => state.scheduled);
+  const createScheduled = useAppStore((state) => state.createScheduled);
+  const cancelScheduled = useAppStore((state) => state.cancelScheduled);
+  const keepRunning = useAppStore((state) => state.keepRunning);
 
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [recent, setRecent] = useState<MeetingRecord[]>([]);
@@ -76,6 +119,9 @@ export default function HomeScreen(): React.JSX.Element {
   const [hostName, setHostName] = useState(profileName);
   const [joinCode, setJoinCode] = useState('');
   const [inviteText, setInviteText] = useState('');
+  const [scheduleDate, setScheduleDate] = useState('');
+  const [scheduleTime, setScheduleTime] = useState('');
+  const [clock, setClock] = useState(() => Date.now());
 
   const displayName = profileName || session?.user.displayName || 'OpenMeet 用户';
   const username = session?.user.displayName || displayName;
@@ -89,11 +135,22 @@ export default function HomeScreen(): React.JSX.Element {
 
   useEffect(() => {
     loadRecent();
+    // A plan can be consumed by its own reminder or a fire while this screen
+    // was away, so re-read the list on every visit.
+    void useAppStore.getState().refreshScheduled();
   }, []);
 
   useEffect(() => {
     setHostName(profileName);
   }, [profileName]);
+
+  // Only tick while there is something counting down.
+  useEffect(() => {
+    if (scheduled.length === 0) return;
+    setClock(Date.now());
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [scheduled.length]);
 
   const resetDialog = () => {
     setDialog(null);
@@ -106,11 +163,18 @@ export default function HomeScreen(): React.JSX.Element {
     setJoinCode('');
     setInviteText('');
     setDialIn('');
+    setScheduleDate('');
+    setScheduleTime('');
   };
 
   const openDialog = (kind: DialogKind) => {
     setDialog(kind);
     setFormError(null);
+    if (kind === 'schedule') {
+      const when = defaultScheduleWhen();
+      setScheduleDate(when.date);
+      setScheduleTime(when.time);
+    }
   };
 
   const handleCreate = async (event: React.FormEvent) => {
@@ -196,6 +260,42 @@ export default function HomeScreen(): React.JSX.Element {
     });
   };
 
+  const handleSchedule = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!session) {
+      toast('error', '定时入会需要先登录服务器');
+      return;
+    }
+    const code = normalizeRoomCode(joinCode);
+    if (!code) {
+      setFormError('房间号格式为 9 位，例如 ABC-DEF-GHJ');
+      return;
+    }
+    const at = combineDateTime(scheduleDate, scheduleTime);
+    if (!Number.isFinite(at)) {
+      setFormError('请选择入会的日期和时间');
+      return;
+    }
+    setBusy(true);
+    setFormError(null);
+    try {
+      await createScheduled({
+        serverUrl: session.serverUrl,
+        roomCode: code,
+        roomTitle: title.trim() || `会议 ${formatRoomCode(code)}`,
+        displayName: hostName.trim() || displayName,
+        at,
+        ...(password ? { password } : {})
+      });
+      resetDialog();
+      toast('success', `已预约在 ${formatDateTime(at)} 自动加入`);
+    } catch (error) {
+      setFormError(errorText(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleInvite = () => {
     if (!inviteText.trim()) {
       setFormError('请粘贴邀请内容');
@@ -231,6 +331,8 @@ export default function HomeScreen(): React.JSX.Element {
     () => Math.min(12, serverInfo?.maxParticipants ?? 8),
     [serverInfo]
   );
+
+  const DialogIcon = dialog ? DIALOG_ICON[dialog] : null;
 
   return (
     <div className="home-screen">
@@ -360,6 +462,84 @@ export default function HomeScreen(): React.JSX.Element {
         <section className="home-section">
           <div className="section-title">
             <div>
+              <h2>定时入会</h2>
+              <p>到点自动走完入会流程，房间号与密码只存在本机</p>
+            </div>
+            <button
+              className="text-button"
+              onClick={() => openDialog('schedule')}
+              disabled={!session}
+              title={session ? '预约自动入会' : '需要先登录服务器'}
+            >
+              <Plus size={14} />
+              新建预约
+            </button>
+          </div>
+
+          {scheduled.length === 0 ? (
+            <div className="empty-state">
+              <div className="empty-icon">
+                <CalendarClock size={24} />
+              </div>
+              <div>
+                <strong>没有待执行的预约</strong>
+                <p>预约后到点会自动进入会议，入会前 60 秒可取消。</p>
+              </div>
+              <button
+                className="secondary-button"
+                onClick={() => openDialog('schedule')}
+                disabled={!session}
+              >
+                预约入会
+              </button>
+            </div>
+          ) : (
+            <div className="recent-list">
+              {scheduled.map((plan) => (
+                <div className="recent-item" key={plan.id}>
+                  <div className="meeting-kind">
+                    <CalendarClock size={18} />
+                  </div>
+                  <div className="recent-main">
+                    <strong>{plan.roomTitle}</strong>
+                    <div className="recent-meta">
+                      <span>{roomLink(plan.roomCode)}</span>
+                      <span>
+                        <Clock3 size={12} />
+                        {formatDateTime(plan.at)}
+                      </span>
+                      <span>{shortServer(plan.serverUrl)}</span>
+                      {plan.hasPassword && (
+                        <span>
+                          <Lock size={12} />
+                          已存密码
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="scheduled-remaining">
+                    <Hourglass size={13} />
+                    {formatRemaining(plan.at - clock)}
+                  </div>
+                  <button className="ghost-button" onClick={() => void cancelScheduled(plan.id)}>
+                    取消预约
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!keepRunning && scheduled.length > 0 && (
+            <div className="inline-note amber">
+              <ShieldCheck size={15} />
+              已关闭「窗口关闭后保持运行」，关闭窗口或退出应用时预约不会执行。
+            </div>
+          )}
+        </section>
+
+        <section className="home-section">
+          <div className="section-title">
+            <div>
               <h2>最近会议</h2>
               <p>只保存在这台设备上</p>
             </div>
@@ -456,18 +636,10 @@ export default function HomeScreen(): React.JSX.Element {
             <div className="modal-head">
               <div>
                 <span className="eyebrow muted">
-                  {dialog === 'create' && <Video size={14} />}
-                  {dialog === 'lan' && <Wifi size={14} />}
-                  {dialog === 'join' && <DoorOpen size={14} />}
-                  {dialog === 'invite' && <Copy size={14} />}
-                  {dialog === 'create' ? '服务器会议' : dialog === 'lan' ? '本机直连' : dialog === 'join' ? '房间号加入' : '邀请加入'}
+                  {DialogIcon && <DialogIcon size={14} />}
+                  {DIALOG_EYEBROW[dialog]}
                 </span>
-                <h2>
-                  {dialog === 'create' && '发起会议'}
-                  {dialog === 'lan' && '发起局域网会议'}
-                  {dialog === 'join' && '加入会议'}
-                  {dialog === 'invite' && '粘贴邀请'}
-                </h2>
+                <h2>{DIALOG_TITLE[dialog]}</h2>
               </div>
               <button className="icon-button" onClick={resetDialog} aria-label="关闭">
                 <X size={17} />
@@ -690,6 +862,85 @@ export default function HomeScreen(): React.JSX.Element {
                   </button>
                 </div>
               </div>
+            )}
+
+            {dialog === 'schedule' && (
+              <form className="modal-form" onSubmit={handleSchedule}>
+                <div className="inline-note">
+                  <CalendarClock size={16} />
+                  到点会自动打开预览页并按当前设备设置入会，入会前 60 秒可取消。最多提前 90 天预约。
+                </div>
+                <label className="field">
+                  <span className="field-label">房间号</span>
+                  <input
+                    value={joinCode}
+                    onChange={(event) => setJoinCode(event.target.value.toUpperCase())}
+                    placeholder="ABC-DEF-GHJ"
+                    className="code-input"
+                    autoFocus
+                    maxLength={11}
+                  />
+                </label>
+                <div className="form-row">
+                  <label className="field">
+                    <span className="field-label">入会日期</span>
+                    <input
+                      type="date"
+                      value={scheduleDate}
+                      min={localDateString()}
+                      onChange={(event) => setScheduleDate(event.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span className="field-label">入会时间</span>
+                    <input
+                      type="time"
+                      value={scheduleTime}
+                      onChange={(event) => setScheduleTime(event.target.value)}
+                    />
+                  </label>
+                </div>
+                <label className="field">
+                  <span className="field-label">会议主题（可选）</span>
+                  <input
+                    value={title}
+                    onChange={(event) => setTitle(event.target.value)}
+                    placeholder="在列表中显示的名称"
+                    maxLength={80}
+                  />
+                </label>
+                <div className="form-row">
+                  <label className="field">
+                    <span className="field-label">入会显示名称</span>
+                    <input value={hostName} onChange={(event) => setHostName(event.target.value)} maxLength={40} />
+                  </label>
+                  <label className="field">
+                    <span className="field-label">房间密码（如有）</span>
+                    <input
+                      value={password}
+                      onChange={(event) => setPassword(event.target.value)}
+                      type="password"
+                      maxLength={64}
+                    />
+                  </label>
+                </div>
+                {!keepRunning && (
+                  <div className="inline-note amber">
+                    <ShieldCheck size={16} />
+                    当前未开启「关闭窗口后保持运行」，关闭窗口的同时也退出应用时预约不会执行。
+                  </div>
+                )}
+                {formError && <div className="form-error">{formError}</div>}
+                <div className="modal-actions">
+                  <button type="button" className="ghost-button" onClick={resetDialog}>
+                    取消
+                  </button>
+                  <button type="submit" className="primary-button" disabled={busy}>
+                    {busy ? <Loader2 size={16} className="spin" /> : <CalendarClock size={16} />}
+                    保存预约
+                  </button>
+                </div>
+              </form>
             )}
           </div>
         </div>

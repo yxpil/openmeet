@@ -7,6 +7,8 @@ import type {
   HistoryEndInput,
   HistoryStartInput,
   LocalChatRecord,
+  ScheduledJoinInput,
+  ScheduledJoinRecord,
   MeetingRecord,
   SessionSaveInput,
   StoredSessionInfo
@@ -102,6 +104,19 @@ const SCHEMA = `
     client_id TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS scheduled_joins (
+    id TEXT PRIMARY KEY,
+    server_url TEXT NOT NULL,
+    room_code TEXT NOT NULL,
+    room_title TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    password BLOB,
+    password_format TEXT NOT NULL CHECK (password_format IN ('safeStorage-v1','plain-v0')),
+    at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_scheduled_at ON scheduled_joins(at);
   CREATE INDEX IF NOT EXISTS idx_meetings_started ON meetings(started_at DESC);
   CREATE INDEX IF NOT EXISTS idx_chat_meeting ON chat_messages(meeting_id, sent_at);
 `;
@@ -218,6 +233,95 @@ export class LocalDatabase {
     this.db.prepare('DELETE FROM sessions WHERE server_url = ?').run(serverUrl);
   }
 
+  /**
+   * Scheduled joins. The room password is a secret, so it gets the same
+   * treatment as a refresh token: system safeStorage when available, and an
+   * explicit format marker so a later run knows how to read it back.
+   */
+  async saveScheduledJoin(input: ScheduledJoinInput): Promise<void> {
+    let blob: Uint8Array | null = null;
+    let format: 'safeStorage-v1' | 'plain-v0' = 'plain-v0';
+    if (input.password) {
+      if (this.storageAvailable) {
+        blob = new Uint8Array(await safeStorage.encryptStringAsync(input.password));
+        format = 'safeStorage-v1';
+      } else {
+        blob = new TextEncoder().encode(input.password);
+      }
+    }
+    this.db
+      .prepare(
+        `INSERT INTO scheduled_joins
+          (id, server_url, room_code, room_title, display_name, password, password_format, at, created_at)
+         VALUES(?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET
+           server_url = excluded.server_url,
+           room_code = excluded.room_code,
+           room_title = excluded.room_title,
+           display_name = excluded.display_name,
+           password = excluded.password,
+           password_format = excluded.password_format,
+           at = excluded.at,
+           created_at = excluded.created_at`
+      )
+      .run(
+        input.id,
+        input.serverUrl,
+        input.roomCode,
+        input.roomTitle,
+        input.displayName,
+        blob,
+        format,
+        input.at,
+        input.createdAt
+      );
+  }
+
+  listScheduledJoins(): ScheduledJoinRecord[] {
+    const rows = this.db
+      .prepare('SELECT * FROM scheduled_joins ORDER BY at ASC LIMIT 100')
+      .all() as Row[];
+    return rows.map((row) => ({
+      id: asString(row.id),
+      serverUrl: asString(row.server_url),
+      roomCode: asString(row.room_code),
+      roomTitle: asString(row.room_title),
+      displayName: asString(row.display_name),
+      at: asNumber(row.at),
+      createdAt: asNumber(row.created_at),
+      hasPassword: row.password !== null && row.password !== undefined,
+      passwordFormat: asString(row.password_format) as 'safeStorage-v1' | 'plain-v0'
+    }));
+  }
+
+  /** Passwords are only ever decrypted at fire time, never listed to the UI. */
+  async loadScheduledJoinPassword(id: string): Promise<string | null> {
+    const row = this.db
+      .prepare('SELECT password, password_format FROM scheduled_joins WHERE id = ?')
+      .get(id) as Row | undefined;
+    if (!row) return null;
+    const blob = asBlob(row.password);
+    if (blob.length === 0) return null;
+    if (row.password_format === 'safeStorage-v1') {
+      if (!this.storageAvailable) return null;
+      try {
+        const decrypted = await safeStorage.decryptStringAsync(Buffer.from(blob));
+        return decrypted.result || null;
+      } catch {
+        return null;
+      }
+    }
+    return new TextDecoder().decode(blob);
+  }
+
+  removeScheduledJoin(id: string): void {
+    this.db.prepare('DELETE FROM scheduled_joins WHERE id = ?').run(id);
+  }
+
+  clearScheduledJoins(): void {
+    this.db.prepare('DELETE FROM scheduled_joins').run();
+  }
+
   startMeeting(input: HistoryStartInput): string {
     const id = `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     this.db
@@ -285,7 +389,9 @@ export class LocalDatabase {
   reset(): void {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      this.db.exec('DELETE FROM chat_messages; DELETE FROM meetings; DELETE FROM sessions; DELETE FROM settings;');
+      this.db.exec(
+        'DELETE FROM chat_messages; DELETE FROM meetings; DELETE FROM sessions; DELETE FROM scheduled_joins; DELETE FROM settings;'
+      );
       this.db.exec('COMMIT');
     } catch (error) {
       this.db.exec('ROLLBACK');

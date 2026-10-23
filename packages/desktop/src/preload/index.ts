@@ -13,17 +13,48 @@ import type {
   OpenMeetBridge,
   ScreenSource,
   SessionLoadResult,
+  ScheduledCreateInput,
+  ScheduledJoinEvent,
+  ScheduledJoinRecord,
   SessionRefreshResult,
   SessionSaveInput
 } from '../shared/ipc.js';
 
-const pendingDeepLinks: string[] = [];
-let deepLinkListener: ((url: string) => void) | null = null;
-ipcRenderer.on(IPC.deepLink, (_event, url: unknown) => {
-  if (typeof url !== 'string') return;
-  if (deepLinkListener) deepLinkListener(url);
-  else pendingDeepLinks.push(url);
-});
+/**
+ * Main can push an event before the renderer has subscribed (a scheduled join
+ * firing during boot). Buffering keeps such an event from being silently lost.
+ */
+function bufferedListener<T>(channel: string, guard: (value: unknown) => value is T) {
+  const pending: T[] = [];
+  let listener: ((value: T) => void) | null = null;
+  ipcRenderer.on(channel, (_event, value: unknown) => {
+    if (!guard(value)) return;
+    if (listener) listener(value);
+    else pending.push(value);
+  });
+  return (callback: (value: T) => void) => {
+    listener = callback;
+    for (const queued of pending.splice(0)) callback(queued);
+    return () => {
+      if (listener === callback) listener = null;
+    };
+  };
+}
+
+const isString = (value: unknown): value is string => typeof value === 'string';
+const isScheduledEvent = (value: unknown): value is ScheduledJoinEvent =>
+  typeof value === 'object' && value !== null && typeof (value as { id?: unknown }).id === 'string';
+
+const subscribeDeepLink = bufferedListener<string>(IPC.deepLink, isString);
+const subscribeScheduledJoin = bufferedListener<ScheduledJoinEvent>(IPC.scheduledJoin, isScheduledEvent);
+const subscribeScheduledReminder = bufferedListener<ScheduledJoinEvent>(
+  IPC.scheduledReminder,
+  isScheduledEvent
+);
+const subscribeScheduledMissed = bufferedListener<ScheduledJoinEvent>(
+  IPC.scheduledMissed,
+  isScheduledEvent
+);
 
 const bridge: OpenMeetBridge = {
   appInfo: () => ipcRenderer.invoke(IPC.appInfo) as Promise<AppInfo>,
@@ -58,13 +89,14 @@ const bridge: OpenMeetBridge = {
   screenSelect: (sourceId) => ipcRenderer.invoke(IPC.screenSelect, sourceId) as Promise<void>,
   clipboardWrite: (text) => ipcRenderer.invoke(IPC.clipboardWrite, text) as Promise<void>,
   openExternal: (url) => ipcRenderer.invoke(IPC.openExternal, url) as Promise<void>,
-  onDeepLink: (callback) => {
-    deepLinkListener = callback;
-    for (const url of pendingDeepLinks.splice(0)) callback(url);
-    return () => {
-      if (deepLinkListener === callback) deepLinkListener = null;
-    };
-  },
+  scheduledList: () => ipcRenderer.invoke(IPC.scheduledList) as Promise<ScheduledJoinRecord[]>,
+  scheduledCreate: (input: ScheduledCreateInput) =>
+    ipcRenderer.invoke(IPC.scheduledCreate, input) as Promise<ScheduledJoinRecord>,
+  scheduledCancel: (id) => ipcRenderer.invoke(IPC.scheduledCancel, id) as Promise<void>,
+  onScheduledJoin: (callback) => subscribeScheduledJoin(callback),
+  onScheduledReminder: (callback) => subscribeScheduledReminder(callback),
+  onScheduledMissed: (callback) => subscribeScheduledMissed(callback),
+  onDeepLink: (callback) => subscribeDeepLink(callback),
   onWindowState: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, state: { maximized: boolean }) => callback(state);
     ipcRenderer.on(IPC.windowState, listener);

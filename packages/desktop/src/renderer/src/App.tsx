@@ -40,6 +40,41 @@ export default function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
+    const offJoin = window.openmeet.onScheduledJoin((event) =>
+      useAppStore.getState().startScheduledJoin(event)
+    );
+    const offReminder = window.openmeet.onScheduledReminder((event) => {
+      const seconds = Math.max(1, Math.round((event.at - Date.now()) / 1000));
+      useAppStore.getState().toast(
+        'info',
+        `「${event.roomTitle}」将在 ${seconds} 秒后自动入会`,
+        {
+          ttlMs: Math.min(60_000, seconds * 1000 + 800),
+          action: {
+            label: '取消',
+            run: () => {
+              void useAppStore
+                .getState()
+                .cancelScheduled(event.id)
+                .then(() => useAppStore.getState().toast('success', '已取消该定时入会'))
+                .catch(() => useAppStore.getState().toast('error', '取消失败'));
+            }
+          }
+        }
+      );
+    });
+    const offMissed = window.openmeet.onScheduledMissed((event) => {
+      useAppStore.getState().toast('error', `「${event.roomTitle}」的定时入会已过期，未执行`);
+      void useAppStore.getState().refreshScheduled();
+    });
+    return () => {
+      offJoin();
+      offReminder();
+      offMissed();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!appInfo) return;
     document.body.classList.toggle('platform-darwin', appInfo.platform === 'darwin');
     document.body.classList.toggle('platform-win', appInfo.platform === 'win32');

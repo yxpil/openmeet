@@ -31,6 +31,45 @@ export function formatMeetingSpeed(startedAt: number): string {
   return `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
 }
 
+/** Countdown to a scheduled join, always phrased as time remaining. */
+export function formatRemaining(ms: number): string {
+  if (ms <= 1000) return '即将入会';
+  const total = Math.floor(ms / 1000);
+  const days = Math.floor(total / 86_400);
+  const hours = Math.floor((total % 86_400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (days > 0) return `${days} 天 ${hours} 小时后`;
+  if (hours > 0) return `${hours} 小时 ${minutes} 分钟后`;
+  if (minutes > 0) return `${minutes} 分 ${String(seconds).padStart(2, '0')} 秒后`;
+  return `${seconds} 秒后`;
+}
+
+/** Local-time date string (YYYY-MM-DD) for <input type="date">. */
+export function localDateString(from = Date.now()): string {
+  const date = new Date(from);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+/** Local-time date/time strings prefilled for a booking an hour out. */
+export function defaultScheduleWhen(from = Date.now()): { date: string; time: string } {
+  const next = new Date(from + 60 * 60 * 1000);
+  next.setMinutes(0, 0, 0);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return {
+    date: localDateString(next.getTime()),
+    time: `${pad(next.getHours())}:${pad(next.getMinutes())}`
+  };
+}
+
+export function combineDateTime(date: string, time: string): number {
+  const [year, month, day] = date.split('-').map(Number);
+  const [hour, minute] = time.split(':').map(Number);
+  if (!year || !month || !day || hour === undefined || minute === undefined) return Number.NaN;
+  return new Date(year, month - 1, day, hour, minute, 0, 0).getTime();
+}
+
 export function initials(name: string): string {
   const trimmed = name.trim();
   if (!trimmed) return '?';

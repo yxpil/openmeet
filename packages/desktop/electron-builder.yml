@@ -3,9 +3,9 @@ productName: OpenMeet
 copyright: Copyright © 2026 OpenMeet contributors
 directories:
   output: release
-  buildResources: build
 files:
   - out/**/*
+  - resources/**
   - package.json
 asar: true
 asarUnpack:

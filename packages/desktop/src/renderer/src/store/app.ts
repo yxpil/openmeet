@@ -8,15 +8,28 @@ import type {
   User
 } from '@openmeet/shared';
 import { probeServer } from '../lib/api';
-import type { AppInfo, LanRoomResult } from '../../../shared/ipc';
+import type {
+  AppInfo,
+  LanRoomResult,
+  ScheduledCreateInput,
+  ScheduledJoinEvent,
+  ScheduledJoinRecord
+} from '../../../shared/ipc';
 
 export type AppScreen = 'boot' | 'auth' | 'home' | 'prejoin' | 'meeting' | 'history';
 export type ToastKind = 'info' | 'success' | 'error';
+
+export interface ToastAction {
+  label: string;
+  run: () => void;
+}
 
 export interface Toast {
   id: number;
   kind: ToastKind;
   text: string;
+  action?: ToastAction;
+  ttlMs?: number;
 }
 
 export interface ServerSession {
@@ -64,6 +77,9 @@ export type JoinIntent =
       code: string;
       title: string;
       password?: string;
+      /** Set by a scheduled join: pre-fill the name and skip the preview page. */
+      displayName?: string;
+      autoJoin?: true;
     }
   | {
       source: 'lan-guest';
@@ -99,6 +115,8 @@ interface AppState {
   intent: JoinIntent | null;
   toasts: Toast[];
   settingsOpen: boolean;
+  scheduled: ScheduledJoinRecord[];
+  keepRunning: boolean;
   bootstrap(): Promise<void>;
   setScreen(screen: AppScreen): void;
   setServerUrlDraft(value: string): void;
@@ -118,13 +136,20 @@ interface AppState {
     title: string;
     inviteToken?: string;
     password?: string;
+    displayName?: string;
+    autoJoin?: true;
   }): void;
   openInviteText(text: string): boolean;
   openInvite(invite: InvitePayload): void;
-  toast(kind: ToastKind, text: string): void;
+  toast(kind: ToastKind, text: string, extra?: { action?: ToastAction; ttlMs?: number }): void;
   dismissToast(id: number): void;
   setSettingsOpen(open: boolean): void;
   returnHome(): void;
+  refreshScheduled(): Promise<void>;
+  createScheduled(input: ScheduledCreateInput): Promise<ScheduledJoinRecord>;
+  cancelScheduled(id: string): Promise<void>;
+  startScheduledJoin(event: ScheduledJoinEvent): void;
+  setKeepRunning(on: boolean): Promise<void>;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -199,20 +224,27 @@ export const useAppStore = create<AppState>((set, get) => ({
   intent: null,
   toasts: [],
   settingsOpen: false,
+  scheduled: [],
+  keepRunning: true,
 
   async bootstrap() {
     try {
-      const [appInfo, profile, settings, sessionResult, lastServer] = await Promise.all([
-        window.openmeet.appInfo(),
-        window.openmeet.profileGet(),
-        readSettings(),
-        window.openmeet.sessionLoad(),
-        window.openmeet.settingsGet('session.lastServer')
-      ]);
+      const [appInfo, profile, settings, sessionResult, lastServer, keepRunning, scheduled] =
+        await Promise.all([
+          window.openmeet.appInfo(),
+          window.openmeet.profileGet(),
+          readSettings(),
+          window.openmeet.sessionLoad(),
+          window.openmeet.settingsGet('session.lastServer'),
+          window.openmeet.settingsGet('app.keepRunning'),
+          window.openmeet.scheduledList()
+        ]);
       set({
         appInfo,
         profileName: profile.displayName,
         settings,
+        scheduled,
+        keepRunning: keepRunning !== '0',
         serverUrlDraft: lastServer ?? 'http://localhost:8787'
       });
 
@@ -381,6 +413,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         serverUrl,
         code: options.code,
         title: options.title,
+        ...(options.displayName ? { displayName: options.displayName } : {}),
+        ...(options.autoJoin ? { autoJoin: true } : {}),
         ...(options.password ? { password: options.password } : {})
       },
       screen: 'prejoin'
@@ -432,10 +466,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
-  toast(kind, text) {
+  toast(kind, text, extra) {
     const id = ++toastSequence;
-    set({ toasts: [...get().toasts, { id, kind, text }] });
-    window.setTimeout(() => get().dismissToast(id), 4600);
+    set({ toasts: [...get().toasts, { id, kind, text, action: extra?.action, ttlMs: extra?.ttlMs }] });
+    window.setTimeout(() => get().dismissToast(id), extra?.ttlMs ?? 4600);
   },
 
   dismissToast(id) {
@@ -448,6 +482,61 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   returnHome() {
     set({ screen: 'home', intent: null });
+  },
+
+  async refreshScheduled() {
+    try {
+      set({ scheduled: await window.openmeet.scheduledList() });
+    } catch {
+      set({ scheduled: [] });
+    }
+  },
+
+  async createScheduled(input) {
+    const record = await window.openmeet.scheduledCreate(input);
+    await get().refreshScheduled();
+    return record;
+  },
+
+  async cancelScheduled(id) {
+    await window.openmeet.scheduledCancel(id);
+    set({ scheduled: get().scheduled.filter((item) => item.id !== id) });
+  },
+
+  /**
+   * Hand a plan that just fired to the prejoin screen. The join itself runs
+   * through the normal path, so scheduled entry can't drift from manual entry.
+   */
+  startScheduledJoin(event) {
+    const state = get();
+    const label = `「${event.roomTitle}」`;
+    // The plan is single-use: drop it from the list even if the join below
+    // can't run, so a stale row never promises a second attempt.
+    set({ scheduled: state.scheduled.filter((item) => item.id !== event.id) });
+    if (state.screen === 'meeting' || state.screen === 'prejoin') {
+      state.toast('error', `定时入会已跳过 ${label}：当前已在其它会议中`);
+      return;
+    }
+    if (!state.session || normalizeServerUrl(state.session.serverUrl) !== event.serverUrl) {
+      state.toast('error', `定时入会已跳过 ${label}：请先登录该服务器`);
+      return;
+    }
+    if (event.passwordUnavailable) {
+      state.toast('error', `${label} 的房间密码无法自动解密，请手动输入后加入`);
+    }
+    state.openServerJoin({
+      serverUrl: event.serverUrl,
+      code: event.roomCode,
+      title: event.roomTitle,
+      displayName: event.displayName,
+      autoJoin: true,
+      ...(event.password ? { password: event.password } : {})
+    });
+  },
+
+  async setKeepRunning(on) {
+    await window.openmeet.settingsSet('app.keepRunning', on ? '1' : '0');
+    set({ keepRunning: on });
   }
 }));
 

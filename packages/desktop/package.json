@@ -6,7 +6,7 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "build": "node scripts/make-tray-icon.mjs && electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
     "package:win": "npm run build && electron-builder --win --x64",

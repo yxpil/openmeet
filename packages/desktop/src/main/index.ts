@@ -28,6 +28,8 @@ import type {
   SessionSaveInput
 } from '../shared/ipc.js';
 import { LocalDatabase } from './local-db.js';
+import { ScheduledJoinService } from './scheduled-service.js';
+import { createTray, showMainWindow, type TrayController } from './tray.js';
 
 app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
@@ -38,8 +40,11 @@ let localDb: LocalDatabase | null = null;
 let pendingDeepLink: string | null = null;
 let selectedSourceId: string | null = null;
 let lanServer: RunningServer | null = null;
+let scheduled: ScheduledJoinService | null = null;
+let tray: TrayController | null = null;
 let lanStarting: Promise<RunningServer> | null = null;
 let quitting = false;
+let keepRunningWhenClosed = true;
 
 function isAppUrl(url: string): boolean {
   if (url.startsWith('file://')) return true;
@@ -115,6 +120,12 @@ function createWindow(): void {
   mainWindow.on('unmaximize', () =>
     mainWindow?.webContents.send(IPC.windowState, { maximized: false })
   );
+  mainWindow.on('close', (event) => {
+    if (quitting || !tray?.visible || !keepRunningWhenClosed) return;
+    // Hiding instead of closing is what lets a scheduled join still fire.
+    event.preventDefault();
+    mainWindow?.hide();
+  });
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -323,6 +334,22 @@ function registerIpc(): void {
     if (!/^[a-zA-Z0-9._-]+$/.test(name)) throw new Error('设置键不合法');
     if (typeof value !== 'string' || value.length > 4096) throw new Error('设置值不合法');
     localDb?.setSetting(name, value);
+    if (name === 'app.keepRunning') {
+      keepRunningWhenClosed = value !== '0';
+      if (keepRunningWhenClosed && !tray?.visible) {
+        tray = createTray(
+          () => showMainWindow(mainWindow),
+          () => {
+            quitting = true;
+            app.quit();
+          }
+        );
+        if (!tray) keepRunningWhenClosed = false;
+      } else if (!keepRunningWhenClosed) {
+        tray?.dispose();
+        tray = null;
+      }
+    }
   });
 
   ipcMain.handle(IPC.profileGet, () => ({
@@ -407,10 +434,18 @@ function registerIpc(): void {
     localDb?.clearHistory();
   });
   ipcMain.handle(IPC.dataReset, () => {
+    scheduled?.clear();
     localDb?.reset();
   });
 
-  ipcMain.handle(IPC.lanCreateRoom, (_event, input: unknown) => createLanRoom(input as LanCreateInput));
+  ipcMain.handle(IPC.scheduledList, () => scheduled?.list() ?? []);
+  ipcMain.handle(IPC.scheduledCreate, (_event, input: unknown) => {
+    if (!scheduled) throw new Error('定时入会尚未就绪');
+    return scheduled.create(input);
+  });
+  ipcMain.handle(IPC.scheduledCancel, (_event, id: unknown) => {
+    scheduled?.cancel(id);
+  });
   ipcMain.handle(IPC.lanStatus, () => getLanStatus());
   ipcMain.handle(IPC.lanStop, () => stopLanServer());
 
@@ -476,10 +511,25 @@ if (!app.requestSingleInstanceLock()) {
   void app.whenReady().then(async () => {
     registerProtocol();
     localDb = await LocalDatabase.open(join(app.getPath('userData'), 'openmeet.db'));
+    keepRunningWhenClosed = localDb.getSetting('app.keepRunning') !== '0';
     registerIpc();
     configureSession();
     Menu.setApplicationMenu(null);
     createWindow();
+    scheduled = new ScheduledJoinService(localDb, () =>
+      BrowserWindow.getAllWindows().filter((window) => !window.isDestroyed())
+    );
+    scheduled.start();
+    if (keepRunningWhenClosed) {
+      tray = createTray(
+        () => showMainWindow(mainWindow),
+        () => {
+          quitting = true;
+          app.quit();
+        }
+      );
+      if (!tray) keepRunningWhenClosed = false;
+    }
     mainWindow?.webContents.once('did-finish-load', () => {
       if (pendingDeepLink) {
         const link = pendingDeepLink;
@@ -498,9 +548,10 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('before-quit', (event) => {
-    if (quitting || (!lanServer && !lanStarting)) return;
-    event.preventDefault();
+    const wasQuitting = quitting;
     quitting = true;
+    if (wasQuitting || (!lanServer && !lanStarting)) return;
+    event.preventDefault();
     const pending = lanStarting;
     void (pending ? pending.catch(() => undefined) : Promise.resolve())
       .then(() => stopLanServer())
@@ -509,6 +560,9 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.on('will-quit', () => {
+    scheduled?.stop();
+    tray?.dispose();
+    tray = null;
     localDb?.close();
     localDb = null;
   });

@@ -13,6 +13,17 @@ export default function Toasts(): React.JSX.Element {
           <div key={toast.id} className={`toast toast-${toast.kind}`}>
             <Icon size={17} />
             <span>{toast.text}</span>
+            {toast.action && (
+              <button
+                className="toast-action"
+                onClick={() => {
+                  toast.action?.run();
+                  dismiss(toast.id);
+                }}
+              >
+                {toast.action.label}
+              </button>
+            )}
             <button className="icon-button subtle" onClick={() => dismiss(toast.id)} aria-label="关闭提示">
               <X size={14} />
             </button>

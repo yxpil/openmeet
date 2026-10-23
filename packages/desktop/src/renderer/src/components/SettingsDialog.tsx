@@ -39,6 +39,8 @@ export default function SettingsDialog(): React.JSX.Element | null {
   const setProfileName = useAppStore((state) => state.setProfileName);
   const logout = useAppStore((state) => state.logout);
   const toast = useAppStore((state) => state.toast);
+  const keepRunning = useAppStore((state) => state.keepRunning);
+  const setKeepRunning = useAppStore((state) => state.setKeepRunning);
 
   const [tab, setTab] = useState<Tab>('profile');
   const [draft, setDraft] = useState<AppSettings>(settings);
@@ -126,6 +128,17 @@ export default function SettingsDialog(): React.JSX.Element | null {
       window.location.reload();
     } catch {
       toast('error', '重置失败');
+    }
+  };
+
+  // Applied immediately: turning this off must destroy the tray right away,
+  // otherwise a window closed before saving would still hide instead of quit.
+  const toggleKeepRunning = async (on: boolean) => {
+    try {
+      await setKeepRunning(on);
+      toast('success', on ? '已开启托盘常驻，定时入会可按时执行' : '已关闭托盘常驻，关闭窗口即退出');
+    } catch {
+      toast('error', '修改失败');
     }
   };
 
@@ -376,6 +389,18 @@ export default function SettingsDialog(): React.JSX.Element | null {
                   <h3>本地数据</h3>
                   <p>账号令牌、设置、会议历史与聊天保存在本机 SQLite。</p>
                 </div>
+
+                <label className="switch-row">
+                  <span>
+                    <strong>关闭窗口后保持运行</strong>
+                    <small>常驻系统托盘，定时入会才能按时执行</small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={keepRunning}
+                    onChange={(event) => void toggleKeepRunning(event.target.checked)}
+                  />
+                </label>
 
                 <div className="settings-info-row">
                   <span>数据目录</span>

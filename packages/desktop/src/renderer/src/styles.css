@@ -274,7 +274,8 @@ p {
   transform: translateY(1px);
 }
 
-.primary-button.wide {
+.primary-button.wide,
+.secondary-button.wide {
   width: 100%;
 }
 

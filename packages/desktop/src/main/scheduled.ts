@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import type { ScheduledJoinKind } from '../shared/ipc.js';
 
 export interface ScheduledJoin {
   id: string;
+  kind: ScheduledJoinKind;
   serverUrl: string;
   roomCode: string;
   roomTitle: string;
@@ -10,6 +12,8 @@ export interface ScheduledJoin {
   at: number;
   createdAt: number;
   password?: string;
+  lobby: boolean;
+  maxParticipants: number;
 }
 
 export interface ScheduleStore {
@@ -39,13 +43,23 @@ export type ScheduleValidation = { ok: true } | { ok: false; error: string };
 /** Shared by the IPC boundary and the tests so the rules cannot drift apart. */
 export function validateSchedule(input: {
   at: number;
+  kind: ScheduledJoinKind;
   roomCode: string;
   serverUrl: string;
   displayName: string;
   now: number;
 }): ScheduleValidation {
-  if (!/^[A-Z0-9-]{4,16}$/.test(input.roomCode.trim().toUpperCase())) return { ok: false, error: '房间号不合法' };
-  if (!/^https?:\/\/.+/i.test(input.serverUrl.trim())) return { ok: false, error: '服务器地址不合法' };
+  const code = input.roomCode.trim().toUpperCase();
+  if (input.kind === 'server' && !/^[A-Z0-9-]{4,16}$/.test(code)) {
+    return { ok: false, error: '房间号不合法' };
+  }
+  if (input.kind === 'p2p' && !/^[A-Z0-9]{4,16}$/.test(code.replace(/[^A-Z0-9]/g, ''))) {
+    return { ok: false, error: '会议号需为 4–16 位字母或数字' };
+  }
+  // A hosted LAN room invents its own code at fire time, so none is required.
+  if (input.kind === 'server' && !/^https?:\/\/.+/i.test(input.serverUrl.trim())) {
+    return { ok: false, error: '服务器地址不合法' };
+  }
   const name = input.displayName.trim();
   if (name.length < 1 || name.length > 40) return { ok: false, error: '显示名称需为 1–40 个字符' };
   if (!Number.isFinite(input.at)) return { ok: false, error: '入会时间不合法' };
@@ -122,6 +136,7 @@ export class JoinScheduler {
     if (this.store.list().length >= SCHEDULE_LIMIT) return { ok: false, error: '定时入会数量已达上限' };
     const validation = validateSchedule({
       at: item.at,
+      kind: item.kind,
       roomCode: item.roomCode,
       serverUrl: item.serverUrl,
       displayName: item.displayName,

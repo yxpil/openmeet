@@ -16,6 +16,8 @@ const require = createRequire(import.meta.url);
 const ELECTRON = require('electron');
 const DESKTOP_DIR = join(import.meta.dirname, '..');
 const CODE = process.env.OM_P2P_CODE ?? 'OM7K2QD9';
+/** `--scheduled`: 甲 arrives through a 定时入会 booking instead of clicking join. */
+const SCHEDULED = process.argv.includes('--scheduled');
 const PASSPHRASE = 'same-spoken-secret';
 
 const log = (...args) => console.log(...args);
@@ -169,6 +171,9 @@ async function attach(cdpPort) {
       },
       bodyText() {
         return document.body.textContent || '';
+      },
+      plans() {
+        return window.openmeet.scheduledList();
       }
     };
     return 'ready';
@@ -203,6 +208,61 @@ function launchClient(name, cdpPort) {
   return { child, userDataDir, name, stderr: () => stderr };
 }
 
+/** Land on the home screen the way a LAN-only user does: no account, no server. */
+async function toHome(client) {
+  await client.waitFor(`!!document.querySelector('.auth-screen')`, 60_000, 'auth screen');
+  await client.waitFor(
+    `(() => { const button = document.querySelector('.local-entry'); if (!button) return ''; button.click(); return 'ok'; })()`,
+    15_000,
+    'LAN entry button'
+  );
+  await client.waitFor(`!!document.querySelector('.home-screen')`, 20_000, 'home');
+}
+
+function localFields(epoch) {
+  const d = new Date(epoch);
+  const pad = (value) => String(value).padStart(2, '0');
+  return {
+    date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+    time: `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  };
+}
+
+/** Round up to the next minute, because the booking field only has minute resolution. */
+function ceilToMinute(epoch) {
+  const d = new Date(epoch);
+  d.setSeconds(0, 0);
+  if (d.getTime() < epoch) d.setMinutes(d.getMinutes() + 1);
+  return d.getTime();
+}
+
+/** Book a serverless auto-join through the 定时入会 dialog instead of joining now. */
+async function bookScheduledRoom(client, displayName, at) {
+  const when = localFields(at);
+  await toHome(client);
+  await client.waitFor(`__om.click('新建预约')`, 15_000, 'new booking');
+  await sleep(400);
+  await client.waitFor(`__om.clickTab('直连会议')`, 15_000, 'serverless booking kind tab');
+  await sleep(300);
+  for (const [label, value] of [
+    ['会议号', CODE],
+    ['口令', PASSPHRASE],
+    ['入会日期', when.date],
+    ['入会时间', when.time],
+    ['入会显示名称', displayName]
+  ]) {
+    const result = await client.waitFor(
+      `__om.set(${JSON.stringify(label)}, ${JSON.stringify(value)})`,
+      10_000,
+      `field ${label}`
+    );
+    if (result !== 'ok') throw new Error(`${label}: ${result}`);
+    await sleep(120);
+  }
+  await client.waitFor(`__om.click('保存预约')`, 10_000, 'save booking');
+  await client.waitFor(`!!document.querySelector('.scheduled-remaining')`, 15_000, 'booking row');
+}
+
 /** Enter a serverless room through the real UI: no account, no server. */
 async function joinRoom(client, displayName, options = {}) {
   const { noCamera = false } = options;
@@ -216,13 +276,7 @@ async function joinRoom(client, displayName, options = {}) {
     // The reload wiped the driving helpers.
     await client.install();
   }
-  await client.waitFor(`!!document.querySelector('.auth-screen')`, 60_000, 'auth screen');
-  await client.waitFor(
-    `(() => { const button = document.querySelector('.local-entry'); if (!button) return ''; button.click(); return 'ok'; })()`,
-    15_000,
-    'LAN entry button'
-  );
-  await client.waitFor(`!!document.querySelector('.home-screen')`, 20_000, 'home');
+  await toHome(client);
   await client.waitFor(`__om.click('局域网会议')`, 15_000, 'lan dialog');
   await sleep(400);
   await client.waitFor(`__om.clickTab('无服务器直连')`, 15_000, 'serverless mode tab');
@@ -298,11 +352,27 @@ async function main() {
     const b = await attach(9434);
     clients.push(a, b);
 
-    await joinRoom(a, '甲');
-    check('first client joined a serverless room alone', true);
-    // Discovery is beacon-driven, so the second client joins shortly after.
-    await joinRoom(b, '乙', { noCamera: true });
-    check('second client joined the same code and passphrase', true);
+    if (SCHEDULED) {
+      const dueAt = ceilToMinute(Date.now() + 40_000);
+      await bookScheduledRoom(a, '甲', dueAt);
+      check('甲 booked a serverless auto-join through 定时入会', true);
+      await joinRoom(b, '乙', { noCamera: true });
+      log(`  waiting for the booking at ${new Date(dueAt).toLocaleTimeString('zh-CN')}`);
+      const fired = await a.settle(
+        `!!document.querySelector('.meeting-screen')`,
+        Math.max(25_000, dueAt + 40_000 - Date.now()),
+        '甲 auto-joined the serverless room'
+      );
+      check('scheduled serverless join fired with no clicks', Boolean(fired));
+      const leftover = await a.evaluate(`__om.plans().then((list) => list.length)`);
+      check('booking consumed after firing', leftover === 0, String(leftover));
+    } else {
+      await joinRoom(a, '甲');
+      check('first client joined a serverless room alone', true);
+      // Discovery is beacon-driven, so the second client joins shortly after.
+      await joinRoom(b, '乙', { noCamera: true });
+      check('second client joined the same code and passphrase', true);
+    }
 
     const aSees = await a.settle(`__om.seesTile('乙')`, 30_000, '甲 sees 乙');
     check('peer discovered and shown over the mesh', aSees === 'yes', JSON.stringify(await a.evaluate(`__om.names()`)));

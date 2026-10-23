@@ -7,7 +7,8 @@ import type {
   ServerInfo,
   User
 } from '@openmeet/shared';
-import { probeServer } from '../lib/api';
+import { probeServer, waitForRoomOpen } from '../lib/api';
+import type { RoomWaitHandle } from '../lib/api';
 import type {
   AppInfo,
   LanRoomResult,
@@ -59,7 +60,7 @@ export type JoinIntent =
       invite: InvitePayload;
       inviteText: string;
     }
-  | { source: 'lan-host'; kind: 'lan'; lan: LanRoomResult }
+  | { source: 'lan-host'; kind: 'lan'; lan: LanRoomResult; autoJoin?: true }
   | {
       source: 'server-guest';
       kind: 'server';
@@ -69,6 +70,7 @@ export type JoinIntent =
       inviteToken?: string;
       password?: string;
       invite?: InvitePayload;
+      autoJoin?: true;
     }
   | {
       source: 'server-code';
@@ -90,6 +92,7 @@ export type JoinIntent =
       endpoints: string[];
       inviteToken: string;
       invite: InvitePayload;
+      autoJoin?: true;
     }
   | {
       /** Serverless LAN meeting: code + passphrase, no coordinator anywhere. */
@@ -99,6 +102,7 @@ export type JoinIntent =
       title: string;
       passphrase: string;
       displayName: string;
+      autoJoin?: true;
     };
 
 export function intentTitle(intent: JoinIntent): string {
@@ -126,6 +130,9 @@ interface AppState {
   settingsOpen: boolean;
   scheduled: ScheduledJoinRecord[];
   keepRunning: boolean;
+  /** Non-null while polling for a room that has not started yet. */
+  waitingFor: { code: string; title: string } | null;
+  autoReturn: boolean;
   bootstrap(): Promise<void>;
   setScreen(screen: AppScreen): void;
   setServerUrlDraft(value: string): void;
@@ -137,7 +144,7 @@ interface AppState {
   updateSettings(patch: Partial<AppSettings>): Promise<void>;
   setIntent(intent: JoinIntent): void;
   clearIntent(): void;
-  startLanHost(lan: LanRoomResult): void;
+  startLanHost(lan: LanRoomResult, autoJoin?: boolean): void;
   startServerHost(join: JoinResponse, serverUrl: string, invite: InvitePayload, inviteText: string): void;
   openServerJoin(options: {
     serverUrl: string;
@@ -148,9 +155,15 @@ interface AppState {
     displayName?: string;
     autoJoin?: true;
   }): void;
-  openInviteText(text: string): boolean;
-  openInvite(invite: InvitePayload): void;
-  openLanP2p(options: { code: string; title: string; passphrase: string; displayName: string }): void;
+  openInviteText(text: string, autoJoin?: boolean): boolean;
+  openInvite(invite: InvitePayload, autoJoin?: boolean): void;
+  openLanP2p(options: {
+    code: string;
+    title: string;
+    passphrase: string;
+    displayName: string;
+    autoJoin?: boolean;
+  }): void;
   toast(kind: ToastKind, text: string, extra?: { action?: ToastAction; ttlMs?: number }): void;
   dismissToast(id: number): void;
   setSettingsOpen(open: boolean): void;
@@ -160,6 +173,15 @@ interface AppState {
   cancelScheduled(id: string): Promise<void>;
   startScheduledJoin(event: ScheduledJoinEvent): void;
   setKeepRunning(on: boolean): Promise<void>;
+  startWaiting(options: {
+    serverUrl: string;
+    code: string;
+    title: string;
+    password?: string;
+    inviteToken?: string;
+  }): void;
+  cancelWaiting(): void;
+  setAutoReturn(on: boolean): Promise<void>;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -187,6 +209,7 @@ const SETTING_KEYS: Record<keyof AppSettings, string> = {
 };
 
 let toastSequence = 0;
+let waitHandle: RoomWaitHandle | null = null;
 
 async function readSettings(): Promise<AppSettings> {
   const values = await Promise.all(
@@ -236,10 +259,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   settingsOpen: false,
   scheduled: [],
   keepRunning: true,
+  waitingFor: null,
+  autoReturn: true,
 
   async bootstrap() {
     try {
-      const [appInfo, profile, settings, sessionResult, lastServer, keepRunning, scheduled] =
+      const [appInfo, profile, settings, sessionResult, lastServer, keepRunning, scheduled, autoReturn] =
         await Promise.all([
           window.openmeet.appInfo(),
           window.openmeet.profileGet(),
@@ -247,7 +272,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           window.openmeet.sessionLoad(),
           window.openmeet.settingsGet('session.lastServer'),
           window.openmeet.settingsGet('app.keepRunning'),
-          window.openmeet.scheduledList()
+          window.openmeet.scheduledList(),
+          window.openmeet.settingsGet('app.autoReturn')
         ]);
       set({
         appInfo,
@@ -255,6 +281,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         settings,
         scheduled,
         keepRunning: keepRunning !== '0',
+        autoReturn: autoReturn !== '0',
         serverUrlDraft: lastServer ?? 'http://localhost:8787'
       });
 
@@ -347,6 +374,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   async logout() {
     const session = get().session;
+    get().cancelWaiting();
     if (session) await window.openmeet.sessionClear(session.serverUrl);
     set({ session: null, serverInfo: null, screen: 'auth', intent: null });
   },
@@ -374,9 +402,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ intent: null });
   },
 
-  startLanHost(lan) {
+  startLanHost(lan, autoJoin) {
     set({
-      intent: { source: 'lan-host', kind: 'lan', lan },
+      intent: { source: 'lan-host', kind: 'lan', lan, ...(autoJoin ? { autoJoin: true } : {}) },
       screen: 'prejoin'
     });
   },
@@ -410,7 +438,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           code: options.code,
           title: options.title,
           inviteToken: options.inviteToken,
-          ...(options.password ? { password: options.password } : {})
+          ...(options.password ? { password: options.password } : {}),
+          ...(options.autoJoin ? { autoJoin: true } : {})
         },
         screen: 'prejoin'
       });
@@ -431,17 +460,17 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
-  openInviteText(text) {
+  openInviteText(text, autoJoin) {
     const invite = decodeInvite(text);
     if (!invite) {
       get().toast('error', '邀请内容无法识别，请确认复制完整');
       return false;
     }
-    get().openInvite(invite);
+    get().openInvite(invite, autoJoin);
     return true;
   },
 
-  openInvite(invite) {
+  openInvite(invite, autoJoin) {
     if (get().screen === 'prejoin' || get().screen === 'meeting') {
       get().toast('info', '请先离开当前会议，再打开新的邀请');
       return;
@@ -456,7 +485,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           roomId: invite.rid as string,
           endpoints: invite.endpoints ?? [],
           inviteToken: invite.token,
-          invite
+          invite,
+          ...(autoJoin ? { autoJoin: true } : {})
         },
         screen: 'prejoin'
       });
@@ -470,7 +500,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         code: invite.code,
         title: invite.title,
         inviteToken: invite.token,
-        invite
+        invite,
+        ...(autoJoin ? { autoJoin: true } : {})
       },
       screen: 'prejoin'
     });
@@ -484,7 +515,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         code: options.code,
         title: options.title,
         passphrase: options.passphrase,
-        displayName: options.displayName
+        displayName: options.displayName,
+        ...(options.autoJoin ? { autoJoin: true } : {})
       },
       screen: 'prejoin'
     });
@@ -504,6 +536,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   returnHome() {
+    get().cancelWaiting();
     set({ screen: 'home', intent: null });
   },
 
@@ -527,8 +560,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   /**
-   * Hand a plan that just fired to the prejoin screen. The join itself runs
-   * through the normal path, so scheduled entry can't drift from manual entry.
+   * Hand a plan that just fired to the prejoin screen. Every kind reuses the
+   * normal join path, so a scheduled entry can never drift from a manual one.
    */
   startScheduledJoin(event) {
     const state = get();
@@ -540,14 +573,52 @@ export const useAppStore = create<AppState>((set, get) => ({
       state.toast('error', `定时入会已跳过 ${label}：当前已在其它会议中`);
       return;
     }
-    if (!state.session || normalizeServerUrl(state.session.serverUrl) !== event.serverUrl) {
-      state.toast('error', `定时入会已跳过 ${label}：请先登录该服务器`);
+    if (event.passwordUnavailable) {
+      const what = event.kind === 'p2p' ? '口令' : '房间密码';
+      state.toast('error', `${label} 的${what}无法自动解密，请手动输入后加入`);
+    }
+
+    if (event.kind === 'p2p') {
+      state.openLanP2p({
+        code: event.roomCode,
+        title: event.roomTitle,
+        // The stored passphrase is what unlocks the room digest; without it the
+        // plan can never be honoured, so say so instead of joining an empty room.
+        passphrase: event.password ?? '',
+        displayName: event.displayName,
+        autoJoin: true
+      });
+      if (!event.password) {
+        state.toast('error', `${label} 缺少口令，请在预约中重新填写`);
+      }
       return;
     }
-    if (event.passwordUnavailable) {
-      state.toast('error', `${label} 的房间密码无法自动解密，请手动输入后加入`);
+
+    if (event.kind === 'lan') {
+      // Hosting on a schedule: create the room now, then walk the normal host path.
+      void window.openmeet
+        .lanCreateRoom({
+          title: event.roomTitle,
+          hostName: event.displayName,
+          ...(event.password ? { password: event.password } : {}),
+          lobby: event.lobby,
+          maxParticipants: event.maxParticipants
+        })
+        .then((result) => {
+          useAppStore.getState().startLanHost(result, true);
+        })
+        .catch((error: unknown) => {
+          state.toast('error', `${label} 未能开启：${error instanceof Error ? error.message : '局域网服务启动失败'}`);
+        });
+      return;
     }
-    state.openServerJoin({
+
+    const current = get();
+    if (!current.session || normalizeServerUrl(current.session.serverUrl) !== event.serverUrl) {
+      current.toast('error', `定时入会已跳过 ${label}：请先登录该服务器`);
+      return;
+    }
+    current.openServerJoin({
       serverUrl: event.serverUrl,
       code: event.roomCode,
       title: event.roomTitle,
@@ -560,6 +631,63 @@ export const useAppStore = create<AppState>((set, get) => ({
   async setKeepRunning(on) {
     await window.openmeet.settingsSet('app.keepRunning', on ? '1' : '0');
     set({ keepRunning: on });
+  },
+
+  startWaiting(options) {
+    const state = get();
+    if (state.waitingFor) state.cancelWaiting();
+    const session = state.session;
+    const useAuth = session && normalizeServerUrl(session.serverUrl) === normalizeServerUrl(options.serverUrl);
+    set({ waitingFor: { code: options.code, title: options.title } });
+    waitHandle = waitForRoomOpen(
+      options.serverUrl,
+      options.code,
+      useAuth && session
+        ? { ...(options.password ? { password: options.password } : {}) }
+        : {
+            displayName: state.profileName || session?.user.displayName || '访客',
+            ...(options.password ? { password: options.password } : {}),
+            ...(options.inviteToken ? { inviteToken: options.inviteToken } : {})
+          },
+      useAuth && session
+        ? {
+            token: session.accessToken,
+            refresh: () => get().refreshAccessToken()
+          }
+        : undefined
+    );
+    void waitHandle.promise.then((result) => {
+      if (result.code === 'cancelled') return;
+      const current = get();
+      current.cancelWaiting();
+      if (!result.ok) {
+        current.toast('error', result.message || '无法加入该会议');
+        return;
+      }
+      current.toast('success', `「${options.title}」已开始，正在进入`);
+      current.openServerJoin({
+        serverUrl: options.serverUrl,
+        code: options.code,
+        title: options.title,
+        ...(options.inviteToken
+          ? { inviteToken: options.inviteToken }
+          : {}),
+        ...(options.password ? { password: options.password } : {}),
+        autoJoin: true
+      });
+    });
+  },
+
+  cancelWaiting() {
+    waitHandle?.cancel();
+    waitHandle = null;
+    set({ waitingFor: null });
+  },
+
+  async setAutoReturn(on) {
+    await window.openmeet.settingsSet('app.autoReturn', on ? '1' : '0');
+    set({ autoReturn: on });
+    if (!on) get().cancelWaiting();
   }
 }));
 

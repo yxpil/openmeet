@@ -506,6 +506,30 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
           });
           if (context?.isLanHost) void window.openmeet.lanStop();
           app.toast('info', labels[reason]);
+          // A room that ended while I was attending may be reopened by its host;
+          // waiting on my own 结束会议 or on an empty room I just left is not a
+          // recovery, it is a fight with the user over the same button.
+          const current = useAppStore.getState();
+          const intent = current.intent;
+          const iEndedIt = reason === 'host_ended' && get().self?.role === 'host';
+          const worthWaiting =
+            reason === 'server_shutdown' || (reason === 'host_ended' && !iEndedIt);
+          if (
+            current.autoReturn &&
+            worthWaiting &&
+            context?.mode === 'server' &&
+            context.serverUrl
+          ) {
+            current.startWaiting({
+              serverUrl: context.serverUrl,
+              code: context.room.code,
+              title: context.room.title,
+              ...(intent && 'password' in intent && intent.password ? { password: intent.password } : {}),
+              ...(intent && intent.source === 'server-guest' && intent.inviteToken
+                ? { inviteToken: intent.inviteToken }
+                : {})
+            });
+          }
           client?.dispose();
           client = null;
         },

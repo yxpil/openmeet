@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
+  CalendarClock,
   Camera,
   CameraOff,
   Globe2,
@@ -76,6 +77,9 @@ export default function PrejoinScreen(): React.JSX.Element {
   const toast = useAppStore((state) => state.toast);
   const clearIntent = useAppStore((state) => state.clearIntent);
   const returnHome = useAppStore((state) => state.returnHome);
+  const waitingFor = useAppStore((state) => state.waitingFor);
+  const startWaiting = useAppStore((state) => state.startWaiting);
+  const cancelWaiting = useAppStore((state) => state.cancelWaiting);
   const join = useMeetingStore((state) => state.join);
 
   const initialPassword =
@@ -213,7 +217,7 @@ export default function PrejoinScreen(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const autoJoin = intent?.source === 'server-code' && intent.autoJoin === true;
+  const autoJoin = intent ? 'autoJoin' in intent && intent.autoJoin === true : false;
 
   useEffect(() => {
     if (!devicesReady || !autoJoin || autoJoinFiredRef.current) return;
@@ -359,6 +363,19 @@ export default function PrejoinScreen(): React.JSX.Element {
   const isLan = intent.kind === 'lan';
   const serverUrl = intent.kind === 'server' ? intent.serverUrl : null;
   const endpoints = intent.source === 'lan-guest' ? intent.endpoints : [];
+  // Only a room that lives on a server can be "not started yet"; a serverless
+  // code is the room, so joining an empty one is already the waiting behaviour.
+  const waitingRoom =
+    intent.source === 'server-code' || intent.source === 'server-guest'
+      ? {
+          serverUrl: intent.serverUrl,
+          code: intent.code,
+          title: intent.title,
+          ...(intent.source === 'server-guest' && intent.inviteToken
+            ? { inviteToken: intent.inviteToken }
+            : {})
+        }
+      : null;
 
   const handleJoin = async () => {
     if (joining) return;
@@ -596,6 +613,29 @@ export default function PrejoinScreen(): React.JSX.Element {
             {joining ? <Loader2 size={18} className="spin" /> : <ArrowLeft size={18} className="enter-arrow" />}
             {joining ? '正在加入…' : isHost ? '进入会议' : '加入会议'}
           </button>
+
+          {waitingRoom && (
+            <button
+              className={`secondary-button wide ${waitingFor ? 'waiting' : ''}`}
+              onClick={() => {
+                if (waitingFor) {
+                  cancelWaiting();
+                  return;
+                }
+                startWaiting({
+                  serverUrl: waitingRoom.serverUrl,
+                  code: waitingRoom.code,
+                  title: waitingRoom.title,
+                  ...(password ? { password } : {}),
+                  ...(waitingRoom.inviteToken ? { inviteToken: waitingRoom.inviteToken } : {})
+                });
+              }}
+              disabled={joining}
+            >
+              {waitingFor ? <Loader2 size={16} className="spin" /> : <CalendarClock size={16} />}
+              {waitingFor ? '正在等待会议开始，点击取消' : '会议还没开始？有人入会后自动加入'}
+            </button>
+          )}
 
           <p className="prejoin-footnote">
             {isLan

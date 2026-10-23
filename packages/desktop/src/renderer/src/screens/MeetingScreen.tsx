@@ -141,6 +141,8 @@ export default function MeetingScreen(): React.JSX.Element {
   const connection = useMeetingStore((state) => state.connection);
   const reconnectAttempt = useMeetingStore((state) => state.reconnectAttempt);
   const ended = useMeetingStore((state) => state.ended);
+  const waitingFor = useAppStore((state) => state.waitingFor);
+  const cancelWaiting = useAppStore((state) => state.cancelWaiting);
   const startedAt = useMeetingStore((state) => state.startedAt);
   const returnHome = useMeetingStore((state) => state.returnHome);
   const toast = useAppStore((state) => state.toast);
@@ -354,6 +356,23 @@ export default function MeetingScreen(): React.JSX.Element {
             <h2>{ended.message}</h2>
             {ended.byName && <p>{ended.byName} 结束了这场会议。</p>}
             <p className="ended-hint">聊天与历史已保存在这台设备上。</p>
+            {waitingFor ? (
+              <div className="inline-note">
+                <Loader2 size={15} className="spin" />
+                正在等待「{waitingFor.title}」重新开始，一旦可加入会自动进入。
+                <button className="text-button" onClick={cancelWaiting}>
+                  取消等待
+                </button>
+              </div>
+            ) : (
+              <p className="ended-hint">
+                {ended.reason === 'host_ended'
+                  ? '主持者重新开启同一房间时会自动返回（可在设置中关闭）。'
+                  : ended.reason === 'server_shutdown'
+                    ? '服务器恢复后会自动返回该房间（可在设置中关闭）。'
+                    : ''}
+              </p>
+            )}
             <button className="primary-button wide" onClick={returnHome}>
               返回首页
             </button>

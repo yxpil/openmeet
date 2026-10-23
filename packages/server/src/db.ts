@@ -34,6 +34,19 @@ export interface CreateRoomRecord {
 
 type Row = Record<string, unknown>;
 
+/** Everything needed to rebuild a live room exactly as its host created it. */
+export interface EndedRoomRow {
+  id: string;
+  code: string;
+  title: string;
+  hostUserId: string;
+  passwordHash: string | null;
+  lobby: boolean;
+  maxParticipants: number;
+  createdAt: number;
+  dialIn: string | null;
+}
+
 function asString(value: unknown): string {
   return typeof value === 'string' ? value : String(value ?? '');
 }
@@ -310,6 +323,43 @@ export class AppDatabase {
     this.db
       .prepare(`UPDATE rooms SET status = 'ended', ended_at = ?, ended_reason = ? WHERE id = ? AND status = 'active'`)
       .run(at, reason, roomId);
+  }
+
+  /** An ended room, by code, for the host who wants to reopen it unchanged. */
+  endedRoomByCode(code: string): EndedRoomRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, code, title, host_user_id, password_hash, lobby, locked, max_participants,
+                created_at, dial_in
+         FROM rooms WHERE code = ? AND status = 'ended'`
+      )
+      .get(code) as Row | undefined;
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      code: String(row.code),
+      title: String(row.title),
+      hostUserId: String(row.host_user_id),
+      passwordHash: row.password_hash === null || row.password_hash === undefined ? null : String(row.password_hash),
+      lobby: Number(row.lobby) === 1,
+      maxParticipants: Number(row.max_participants) || 8,
+      createdAt: Number(row.created_at),
+      dialIn: row.dial_in === null || row.dial_in === undefined ? null : String(row.dial_in)
+    };
+  }
+
+  reactivateRoom(roomId: string): void {
+    this.db
+      .prepare(
+        `UPDATE rooms SET status = 'active', ended_at = NULL, ended_reason = NULL, locked = 0
+         WHERE id = ? AND status = 'ended'`
+      )
+      .run(roomId);
+    // A reopened room starts a fresh attendance record; the old rows stay for history.
+    this.db.prepare('UPDATE room_participants SET left_at = ? WHERE room_id = ? AND left_at IS NULL').run(
+      Date.now(),
+      roomId
+    );
   }
 
   markAllActiveRoomsEnded(at: number, reason: string): void {

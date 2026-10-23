@@ -64,19 +64,27 @@ function harness(
   let created = 0;
   const schedule = (over: Partial<ScheduledJoin> = {}): ScheduledJoin => ({
     id: `sj_${(created += 1)}`,
+    kind: 'server',
     serverUrl: 'http://127.0.0.1:8787',
     roomCode: 'ABC-DEF-GHI',
     roomTitle: '周会',
     displayName: '小明',
     at: clock + 10 * 60_000,
     createdAt: clock,
+    lobby: false,
+    maxParticipants: 8,
     ...over
   });
   return { scheduler, store, fired, reminded, missed, advance, now: () => clock, schedule };
 }
 
 describe('scheduled join validation', () => {
-  const base = { serverUrl: 'http://h:1', displayName: '小明', now: 1_000_000 };
+  const base = {
+    kind: 'server' as const,
+    serverUrl: 'http://h:1',
+    displayName: '小明',
+    now: 1_000_000
+  };
 
   it('rejects a time that is not in the future', () => {
     const result = validateSchedule({ ...base, roomCode: 'ABC-DEF-GHI', at: base.now });
@@ -102,6 +110,26 @@ describe('scheduled join validation', () => {
     const result = validateSchedule({ ...base, roomCode: 'ABC-DEF-GHI', at: far });
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.error, /90 天/);
+  });
+
+  it('applies the right rules per kind', () => {
+    // A hosted LAN room invents its code at fire time, so none is required and
+    // there is no server to name.
+    assert.equal(validateSchedule({ ...base, kind: 'lan', roomCode: '', serverUrl: '', at: base.now + 1000 }).ok, true);
+    // Serverless codes are user-chosen: server-style dashes are not accepted.
+    assert.equal(
+      validateSchedule({ ...base, kind: 'p2p', roomCode: 'OM7K2QD9', serverUrl: '', at: base.now + 1000 }).ok,
+      true
+    );
+    assert.equal(
+      validateSchedule({ ...base, kind: 'p2p', roomCode: 'AB', serverUrl: '', at: base.now + 1000 }).ok,
+      false
+    );
+    // But a server plan still needs its server.
+    assert.equal(
+      validateSchedule({ ...base, kind: 'server', roomCode: 'ABC-DEF-GHI', serverUrl: '', at: base.now + 1000 }).ok,
+      false
+    );
   });
 });
 

@@ -24,7 +24,7 @@ import type {
   SignalData,
   WelcomeSelf
 } from '@openmeet/shared';
-import type { UserRecord } from './db.js';
+import type { EndedRoomRow, UserRecord } from './db.js';
 import { AppDatabase } from './db.js';
 import type { ServerConfig } from './config.js';
 import { clampRoomMax, validateTurnConfig } from './config.js';
@@ -225,6 +225,39 @@ export class RoomManager {
     };
   }
 
+  /** Rebuild a live room exactly as its host created it, under the same code. */
+  private reviveRoom(stored: EndedRoomRow): LiveRoom {
+    const room: LiveRoom = {
+      view: {
+        id: stored.id,
+        code: stored.code,
+        title: stored.title,
+        kind: 'server',
+        locked: false,
+        lobby: stored.lobby,
+        maxParticipants: stored.maxParticipants,
+        hostPeerId: null,
+        createdAt: stored.createdAt,
+        dialIn: stored.dialIn,
+        status: 'active'
+      },
+      hostUserId: stored.hostUserId,
+      passwordHash: stored.passwordHash,
+      peers: new Map(),
+      admittedSids: new Set(),
+      bannedSids: new Set(),
+      emptyTimer: null,
+      hostTimer: null,
+      ended: false
+    };
+    this.db.reactivateRoom(stored.id);
+    this.rooms.set(stored.id, room);
+    this.byCode.set(stored.code, room);
+    this.scheduleEmptyRoom(room);
+    this.logger.info(`Room ${stored.code} reopened by its host`);
+    return room;
+  }
+
   async joinRoom(input: {
     code: string;
     user: UserRecord | null;
@@ -234,7 +267,15 @@ export class RoomManager {
   }): Promise<JoinResponse> {
     const code = normalizeRoomCode(input.code);
     if (!code) api(404, 'roomNotFound', '会议不存在或房间号格式有误');
-    const room = this.byCode.get(code);
+    let room = this.byCode.get(code);
+    if (!room) {
+      // Only the host who created an ended room may reopen it, keeping the same
+      // code, title, password and capacity. Everyone else still faces 410.
+      const stored = this.db.endedRoomByCode(code);
+      if (stored && input.user && input.user.id === stored.hostUserId) {
+        room = this.reviveRoom(stored);
+      }
+    }
     if (!room || room.ended) api(410, 'roomEnded', '会议已结束');
     const user = input.user;
     const isHostUser = Boolean(user && user.id === room.hostUserId);

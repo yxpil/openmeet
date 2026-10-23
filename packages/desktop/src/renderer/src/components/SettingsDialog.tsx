@@ -41,6 +41,8 @@ export default function SettingsDialog(): React.JSX.Element | null {
   const toast = useAppStore((state) => state.toast);
   const keepRunning = useAppStore((state) => state.keepRunning);
   const setKeepRunning = useAppStore((state) => state.setKeepRunning);
+  const autoReturn = useAppStore((state) => state.autoReturn);
+  const setAutoReturn = useAppStore((state) => state.setAutoReturn);
 
   const [tab, setTab] = useState<Tab>('profile');
   const [draft, setDraft] = useState<AppSettings>(settings);
@@ -137,6 +139,15 @@ export default function SettingsDialog(): React.JSX.Element | null {
     try {
       await setKeepRunning(on);
       toast('success', on ? '已开启托盘常驻，定时入会可按时执行' : '已关闭托盘常驻，关闭窗口即退出');
+    } catch {
+      toast('error', '修改失败');
+    }
+  };
+
+  const toggleAutoReturn = async (on: boolean) => {
+    try {
+      await setAutoReturn(on);
+      toast('success', on ? '会议结束后会自动等待并重连' : '已关闭会议结束后的自动等待');
     } catch {
       toast('error', '修改失败');
     }
@@ -399,6 +410,18 @@ export default function SettingsDialog(): React.JSX.Element | null {
                     type="checkbox"
                     checked={keepRunning}
                     onChange={(event) => void toggleKeepRunning(event.target.checked)}
+                  />
+                </label>
+
+                <label className="switch-row">
+                  <span>
+                    <strong>会议结束后继续等待重开</strong>
+                    <small>主持者结束会议后自动等待该房间重新可加入并返回；被移出时不会</small>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={autoReturn}
+                    onChange={(event) => void toggleAutoReturn(event.target.checked)}
                   />
                 </label>
 

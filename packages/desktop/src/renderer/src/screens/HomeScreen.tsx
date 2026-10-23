@@ -35,7 +35,7 @@ import type { InvitePayload } from '@openmeet/shared';
 import { P2P_CODE_PATTERN, normalizeP2pCode } from '../../../shared/p2p';
 import { useAppStore } from '../store/app';
 import { ApiRequestError, createRoom } from '../lib/api';
-import type { MeetingRecord } from '../../../shared/ipc';
+import type { MeetingRecord, ScheduledJoinKind } from '../../../shared/ipc';
 import {
   avatarColors,
   combineDateTime,
@@ -68,6 +68,14 @@ const DIALOG_EYEBROW: Record<DialogMode, string> = {
   join: '房间号加入',
   invite: '邀请加入',
   schedule: '预约自动入会'
+};
+
+const SCHEDULED_KINDS: ScheduledJoinKind[] = ['server', 'lan', 'p2p'];
+
+const SCHEDULED_KIND_LABEL: Record<ScheduledJoinKind, string> = {
+  server: '服务器会议',
+  lan: '局域网主持',
+  p2p: '直连会议'
 };
 
 const DIALOG_TITLE: Record<DialogMode, string> = {
@@ -123,6 +131,7 @@ export default function HomeScreen(): React.JSX.Element {
   const [inviteText, setInviteText] = useState('');
   const [scheduleDate, setScheduleDate] = useState('');
   const [scheduleTime, setScheduleTime] = useState('');
+  const [scheduleKind, setScheduleKind] = useState<ScheduledJoinKind>('server');
   const [lanMode, setLanMode] = useState<'host' | 'p2p'>('host');
   const [p2pCode, setP2pCode] = useState('');
   const [p2pPassphrase, setP2pPassphrase] = useState('');
@@ -170,6 +179,7 @@ export default function HomeScreen(): React.JSX.Element {
     setDialIn('');
     setScheduleDate('');
     setScheduleTime('');
+    setScheduleKind('server');
     setLanMode('host');
     setP2pCode('');
     setP2pPassphrase('');
@@ -289,13 +299,16 @@ export default function HomeScreen(): React.JSX.Element {
 
   const handleSchedule = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!session) {
-      toast('error', '定时入会需要先登录服务器');
+    if (scheduleKind === 'server' && !session) {
+      toast('error', '预约加入服务器会议需要先登录；局域网与直连会议无需账号');
       return;
     }
-    const code = normalizeRoomCode(joinCode);
-    if (!code) {
-      setFormError('房间号格式为 9 位，例如 ABC-DEF-GHJ');
+    const code =
+      scheduleKind === 'server'
+        ? normalizeRoomCode(joinCode) ?? ''
+        : normalizeP2pCode(scheduleKind === 'p2p' ? joinCode : '');
+    if (scheduleKind !== 'lan' && !code) {
+      setFormError(scheduleKind === 'p2p' ? '会议号需为 4–16 位字母或数字' : '房间号格式为 9 位，例如 ABC-DEF-GHJ');
       return;
     }
     const at = combineDateTime(scheduleDate, scheduleTime);
@@ -307,15 +320,24 @@ export default function HomeScreen(): React.JSX.Element {
     setFormError(null);
     try {
       await createScheduled({
-        serverUrl: session.serverUrl,
+        kind: scheduleKind,
+        serverUrl: scheduleKind === 'server' ? session?.serverUrl ?? '' : '',
         roomCode: code,
-        roomTitle: title.trim() || `会议 ${formatRoomCode(code)}`,
+        roomTitle:
+          title.trim() ||
+          (scheduleKind === 'lan'
+            ? `${hostName.trim() || displayName} 的局域网会议`
+            : scheduleKind === 'p2p'
+              ? `直连会议 ${code}`
+              : `会议 ${formatRoomCode(code)}`),
         displayName: hostName.trim() || displayName,
         at,
-        ...(password ? { password } : {})
+        ...(password ? { password } : {}),
+        lobby,
+        maxParticipants
       });
       resetDialog();
-      toast('success', `已预约在 ${formatDateTime(at)} 自动加入`);
+      toast('success', `已预约在 ${formatDateTime(at)} 自动${scheduleKind === 'lan' ? '主持会议' : '入会'}`);
     } catch (error) {
       setFormError(errorText(error));
     } finally {
@@ -495,8 +517,7 @@ export default function HomeScreen(): React.JSX.Element {
             <button
               className="text-button"
               onClick={() => openDialog('schedule')}
-              disabled={!session}
-              title={session ? '预约自动入会' : '需要先登录服务器'}
+              title="预约到点自动入会或主持会议"
             >
               <Plus size={14} />
               新建预约
@@ -512,11 +533,7 @@ export default function HomeScreen(): React.JSX.Element {
                 <strong>没有待执行的预约</strong>
                 <p>预约后到点会自动进入会议，入会前 60 秒可取消。</p>
               </div>
-              <button
-                className="secondary-button"
-                onClick={() => openDialog('schedule')}
-                disabled={!session}
-              >
+              <button className="secondary-button" onClick={() => openDialog('schedule')}>
                 预约入会
               </button>
             </div>
@@ -530,16 +547,23 @@ export default function HomeScreen(): React.JSX.Element {
                   <div className="recent-main">
                     <strong>{plan.roomTitle}</strong>
                     <div className="recent-meta">
-                      <span>{roomLink(plan.roomCode)}</span>
+                      <span>{SCHEDULED_KIND_LABEL[plan.kind]}</span>
+                      {plan.kind !== 'lan' && (
+                        <span>
+                          {plan.kind === 'server'
+                            ? roomLink(plan.roomCode)
+                            : plan.roomCode}
+                        </span>
+                      )}
                       <span>
                         <Clock3 size={12} />
                         {formatDateTime(plan.at)}
                       </span>
-                      <span>{shortServer(plan.serverUrl)}</span>
+                      {plan.kind === 'server' && <span>{shortServer(plan.serverUrl)}</span>}
                       {plan.hasPassword && (
                         <span>
                           <Lock size={12} />
-                          已存密码
+                          {plan.kind === 'p2p' ? '已存口令' : '已存密码'}
                         </span>
                       )}
                     </div>
@@ -967,24 +991,42 @@ export default function HomeScreen(): React.JSX.Element {
 
             {dialog === 'schedule' && (
               <form className="modal-form" onSubmit={handleSchedule}>
+                <div className="mode-tabs">
+                  {SCHEDULED_KINDS.map((kind) => (
+                    <button
+                      key={kind}
+                      type="button"
+                      className={scheduleKind === kind ? 'active' : ''}
+                      onClick={() => setScheduleKind(kind)}
+                    >
+                      {SCHEDULED_KIND_LABEL[kind]}
+                    </button>
+                  ))}
+                </div>
                 <div className="inline-note">
                   <CalendarClock size={16} />
-                  到点会自动打开预览页并按当前设备设置入会，入会前 60 秒可取消。最多提前 90 天预约。
+                  {scheduleKind === 'lan'
+                    ? '到点会由本机开启局域网会议并自动进入主持者席位，因此这台机器届时必须开着 OpenMeet。'
+                    : scheduleKind === 'p2p'
+                      ? '到点自动以相同会议号与口令进入直连会议，无需账号也没有主持者。'
+                      : '到点会自动打开预览页并按当前设备设置入会，入会前 60 秒可取消。最多提前 90 天预约。'}
                 </div>
-                <label className="field">
-                  <span className="field-label">房间号</span>
-                  <input
-                    value={joinCode}
-                    onChange={(event) => setJoinCode(event.target.value.toUpperCase())}
-                    placeholder="ABC-DEF-GHJ"
-                    className="code-input"
-                    autoFocus
-                    maxLength={11}
-                  />
-                </label>
+                {scheduleKind !== 'lan' && (
+                  <label className="field">
+                    <span className="field-label">{scheduleKind === 'p2p' ? '会议号（自行约定）' : '房间号'}</span>
+                    <input
+                      value={joinCode}
+                      onChange={(event) => setJoinCode(event.target.value.toUpperCase())}
+                      placeholder={scheduleKind === 'p2p' ? '例如 OM7K2QD9' : 'ABC-DEF-GHJ'}
+                      className="code-input"
+                      autoFocus
+                      maxLength={scheduleKind === 'p2p' ? 16 : 11}
+                    />
+                  </label>
+                )}
                 <div className="form-row">
                   <label className="field">
-                    <span className="field-label">入会日期</span>
+                    <span className="field-label">{scheduleKind === 'lan' ? '开会日期' : '入会日期'}</span>
                     <input
                       type="date"
                       value={scheduleDate}
@@ -993,7 +1035,7 @@ export default function HomeScreen(): React.JSX.Element {
                     />
                   </label>
                   <label className="field">
-                    <span className="field-label">入会时间</span>
+                    <span className="field-label">{scheduleKind === 'lan' ? '开会时间' : '入会时间'}</span>
                     <input
                       type="time"
                       value={scheduleTime}
@@ -1002,7 +1044,7 @@ export default function HomeScreen(): React.JSX.Element {
                   </label>
                 </div>
                 <label className="field">
-                  <span className="field-label">会议主题（可选）</span>
+                  <span className="field-label">会议主题{scheduleKind === 'server' ? '（可选）' : ''}</span>
                   <input
                     value={title}
                     onChange={(event) => setTitle(event.target.value)}
@@ -1012,11 +1054,17 @@ export default function HomeScreen(): React.JSX.Element {
                 </label>
                 <div className="form-row">
                   <label className="field">
-                    <span className="field-label">入会显示名称</span>
+                    <span className="field-label">{scheduleKind === 'lan' ? '主持者显示名称' : '入会显示名称'}</span>
                     <input value={hostName} onChange={(event) => setHostName(event.target.value)} maxLength={40} />
                   </label>
                   <label className="field">
-                    <span className="field-label">房间密码（如有）</span>
+                    <span className="field-label">
+                      {scheduleKind === 'p2p'
+                        ? '口令'
+                        : scheduleKind === 'lan'
+                          ? '房间密码（可选）'
+                          : '房间密码（如有）'}
+                    </span>
                     <input
                       value={password}
                       onChange={(event) => setPassword(event.target.value)}
@@ -1025,6 +1073,40 @@ export default function HomeScreen(): React.JSX.Element {
                     />
                   </label>
                 </div>
+                {scheduleKind === 'lan' && (
+                  <div className="form-row">
+                    <label className="field">
+                      <span className="field-label">人数上限</span>
+                      <select
+                        value={maxParticipants}
+                        onChange={(event) => setMaxParticipants(Number(event.target.value))}
+                      >
+                        {[2, 4, 6, 8, 10, 12].map((value) => (
+                          <option key={value} value={value}>
+                            {value} 人
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="switch-field">
+                      <span>
+                        <strong>等候室</strong>
+                        <small>成员需你手动准入</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={lobby}
+                        onChange={(event) => setLobby(event.target.checked)}
+                      />
+                    </label>
+                  </div>
+                )}
+                {scheduleKind === 'server' && !session && (
+                  <div className="inline-note amber">
+                    <ShieldCheck size={16} />
+                    尚未登录服务器：到点会跳过这条预约，请先在设置中登录该服务器。
+                  </div>
+                )}
                 {!keepRunning && (
                   <div className="inline-note amber">
                     <ShieldCheck size={16} />

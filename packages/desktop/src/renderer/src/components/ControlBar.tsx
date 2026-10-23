@@ -130,7 +130,7 @@ export default function ControlBar({ onInvite }: ControlBarProps): React.JSX.Ele
         <div className="end-confirm" role="alertdialog">
           <div>
             <strong>结束这场会议？</strong>
-            <span>所有成员将被移出，会议无法继续。</span>
+            <span>所有成员将被移出，本场会议结束。</span>
           </div>
           <button className="ghost-button small" onClick={() => setConfirmEnd(false)}>
             取消

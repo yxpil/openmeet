@@ -506,6 +506,56 @@ describe('OpenMeet server', () => {
     assert.equal(gone.status, 410);
     assert.equal(codeOf(gone), 'room_ended');
   });
+
+  it('lets only the host reopen an ended room, keeping code and password', async () => {
+    const created = await api(port, '/api/rooms', {
+      method: 'POST',
+      token: bob.accessToken,
+      body: { title: '周会', password: 'abcd' }
+    });
+    assert.equal(created.status, 201);
+    const room = created.body as unknown as JoinResponse;
+    const code = room.room.code;
+
+    const hostClient = await WsClient.connect(port);
+    await welcome(hostClient, port, room.ticket);
+    hostClient.send({ type: 'room.end' });
+    await hostClient.next('room.ended');
+
+    // A stranger cannot resurrect somebody else's meeting, even knowing the code.
+    const asOther = await api(port, `/api/rooms/${code}/join`, {
+      method: 'POST',
+      token: alice.accessToken,
+      body: { password: 'abcd' }
+    });
+    assert.equal(asOther.status, 410);
+    assert.equal(codeOf(asOther), 'room_ended');
+
+    const reopened = await api(port, `/api/rooms/${code}/join`, {
+      method: 'POST',
+      token: bob.accessToken,
+      body: {}
+    });
+    assert.equal(reopened.status, 200);
+    const again = reopened.body as unknown as JoinResponse;
+    assert.equal(again.room.code, code, 'the same code must come back');
+    assert.equal(again.room.title, '周会');
+
+    // The password survived the reopen: without it the join is refused.
+    const noPassword = await api(port, `/api/rooms/${code}/join`, {
+      method: 'POST',
+      token: alice.accessToken,
+      body: {}
+    });
+    assert.equal(codeOf(noPassword), 'password_required');
+
+    const withPassword = await api(port, `/api/rooms/${code}/join`, {
+      method: 'POST',
+      token: alice.accessToken,
+      body: { password: 'abcd' }
+    });
+    assert.equal(withPassword.status, 200);
+  });
 });
 
 describe('OpenMeet LAN mode', () => {

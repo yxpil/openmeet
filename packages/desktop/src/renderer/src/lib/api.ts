@@ -148,8 +148,7 @@ export function createRoom(
   });
 }
 
-export interface JoinRoomInput {
-  displayName?: string;
+export interface JoinRoomInput {  displayName?: string;
   password?: string;
   inviteToken?: string;
 }
@@ -172,13 +171,78 @@ export function joinRoom(
   );
 }
 
+/**
+ * Errors that mean "not yet" — the room is not joinable at this instant but may
+ * become so, so a waiter keeps polling. Anything else (wrong password, invalid
+ * invite, guests disabled) is a fact the user must see immediately.
+ */
+const WAITABLE_ERRORS: ReadonlySet<string> = new Set([
+  'room_not_found',
+  'room_ended',
+  'room_locked',
+  'room_full',
+  'username_taken'
+]);
+
+export interface RoomWaitHandle {
+  cancel(): void;
+  readonly promise: Promise<{ ok: boolean; code: string; message: string }>;
+}
+
+/**
+ * Probe the real join endpoint until the room lets this caller in. Deliberately
+ * uses join itself rather than a separate status endpoint: "could I join right
+ * now" is exactly the question, and there is no second access-control surface
+ * that could drift from the first. The probe ticket is discarded.
+ */
+export function waitForRoomOpen(
+  serverUrl: string,
+  roomCode: string,
+  input: JoinRoomInput,
+  auth?: { token: string; refresh: () => Promise<string | null> },
+  intervalMs = 5000
+): RoomWaitHandle {
+  let cancelled = false;
+  let timer: number | null = null;
+  const promise = (async (): Promise<{ ok: boolean; code: string; message: string }> => {
+    for (;;) {
+      if (cancelled) return { ok: false, code: 'cancelled', message: '已取消等待' };
+      try {
+        await joinRoom(serverUrl, roomCode, input, auth);
+        return { ok: true, code: 'open', message: '会议已开始' };
+      } catch (error) {
+        if (!(error instanceof ApiRequestError)) {
+          return { ok: false, code: 'error', message: error instanceof Error ? error.message : '查询失败' };
+        }
+        if (!WAITABLE_ERRORS.has(error.code)) {
+          return { ok: false, code: error.code, message: error.message };
+        }
+        // Still closed: the rate limit for join is 30/min/IP, so 5 s is safe.
+        await new Promise<void>((resolve) => {
+          timer = window.setTimeout(() => {
+            timer = null;
+            resolve();
+          }, intervalMs);
+        });
+        if (cancelled) return { ok: false, code: 'cancelled', message: '已取消等待' };
+      }
+    }
+  })();
+  return {
+    cancel() {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    },
+    promise
+  };
+}
+
 export interface LanJoinInput {
   roomId: string;
   inviteToken: string;
   displayName: string;
   password?: string;
 }
-
 export interface LanJoinOutcome {
   response: JoinResponse;
   endpoint: string;

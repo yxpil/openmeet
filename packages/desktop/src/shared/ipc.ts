@@ -126,8 +126,11 @@ export interface ScreenSource {
 }
 
 /** A planned auto-join as stored locally; the password never leaves the main process. */
+export type ScheduledJoinKind = 'server' | 'lan' | 'p2p';
+
 export interface ScheduledJoinRecord {
   id: string;
+  kind: ScheduledJoinKind;
   serverUrl: string;
   roomCode: string;
   roomTitle: string;
@@ -136,6 +139,9 @@ export interface ScheduledJoinRecord {
   createdAt: number;
   hasPassword: boolean;
   passwordFormat: 'safeStorage-v1' | 'plain-v0';
+  /** Only meaningful for kind 'lan': the room this machine will host. */
+  lobby: boolean;
+  maxParticipants: number;
 }
 
 export interface ScheduledJoinInput extends ScheduledJoinRecord {
@@ -143,12 +149,16 @@ export interface ScheduledJoinInput extends ScheduledJoinRecord {
 }
 
 export interface ScheduledCreateInput {
+  kind: ScheduledJoinKind;
   serverUrl: string;
   roomCode: string;
   roomTitle?: string;
   displayName: string;
   at: number;
+  /** Room password for 'server'/'lan', passphrase for 'p2p'. */
   password?: string;
+  lobby?: boolean;
+  maxParticipants?: number;
 }
 
 /** Payload pushed to the renderer when a plan fires or needs attention. */

@@ -31,7 +31,8 @@ export default function App(): React.JSX.Element {
     const unsubscribe = window.openmeet.onDeepLink((url) => {
       const inviteText = extractInviteUrl(url);
       if (inviteText) {
-        useAppStore.getState().openInviteText(inviteText);
+        // Opening a link is an explicit intent to attend: skip the confirmation step.
+        useAppStore.getState().openInviteText(inviteText, true);
       } else {
         useAppStore.getState().toast('error', '邀请链接无法识别');
       }

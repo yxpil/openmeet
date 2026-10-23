@@ -106,12 +106,15 @@ const SCHEMA = `
 
   CREATE TABLE IF NOT EXISTS scheduled_joins (
     id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL DEFAULT 'server',
     server_url TEXT NOT NULL,
     room_code TEXT NOT NULL,
     room_title TEXT NOT NULL,
     display_name TEXT NOT NULL,
     password BLOB,
     password_format TEXT NOT NULL CHECK (password_format IN ('safeStorage-v1','plain-v0')),
+    lobby INTEGER NOT NULL DEFAULT 0,
+    max_participants INTEGER NOT NULL DEFAULT 8,
     at INTEGER NOT NULL,
     created_at INTEGER NOT NULL
   );
@@ -133,9 +136,28 @@ export class LocalDatabase {
     this.db.exec('PRAGMA busy_timeout = 5000;');
     this.db.exec('PRAGMA synchronous = NORMAL;');
     this.db.exec(SCHEMA);
+    this.migrate();
     this.db
       .prepare("INSERT INTO schema_meta(key, value) VALUES('schema_version','1') ON CONFLICT(key) DO NOTHING")
       .run();
+  }
+
+  /** Columns added after the first scheduled-join build; old rows stay valid. */
+  private migrate(): void {
+    const columns = new Set(
+      (this.db.prepare('PRAGMA table_info(scheduled_joins)').all() as Row[]).map((row) =>
+        asString(row.name)
+      )
+    );
+    if (!columns.has('kind')) {
+      this.db.exec("ALTER TABLE scheduled_joins ADD COLUMN kind TEXT NOT NULL DEFAULT 'server'");
+    }
+    if (!columns.has('lobby')) {
+      this.db.exec('ALTER TABLE scheduled_joins ADD COLUMN lobby INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!columns.has('max_participants')) {
+      this.db.exec('ALTER TABLE scheduled_joins ADD COLUMN max_participants INTEGER NOT NULL DEFAULT 8');
+    }
   }
 
   static async open(path: string): Promise<LocalDatabase> {
@@ -252,26 +274,33 @@ export class LocalDatabase {
     this.db
       .prepare(
         `INSERT INTO scheduled_joins
-          (id, server_url, room_code, room_title, display_name, password, password_format, at, created_at)
-         VALUES(?,?,?,?,?,?,?,?,?)
+          (id, kind, server_url, room_code, room_title, display_name, password, password_format,
+           lobby, max_participants, at, created_at)
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(id) DO UPDATE SET
+           kind = excluded.kind,
            server_url = excluded.server_url,
            room_code = excluded.room_code,
            room_title = excluded.room_title,
            display_name = excluded.display_name,
            password = excluded.password,
            password_format = excluded.password_format,
+           lobby = excluded.lobby,
+           max_participants = excluded.max_participants,
            at = excluded.at,
            created_at = excluded.created_at`
       )
       .run(
         input.id,
+        input.kind,
         input.serverUrl,
         input.roomCode,
         input.roomTitle,
         input.displayName,
         blob,
         format,
+        input.lobby ? 1 : 0,
+        input.maxParticipants,
         input.at,
         input.createdAt
       );
@@ -283,6 +312,7 @@ export class LocalDatabase {
       .all() as Row[];
     return rows.map((row) => ({
       id: asString(row.id),
+      kind: (asString(row.kind) || 'server') as ScheduledJoinRecord['kind'],
       serverUrl: asString(row.server_url),
       roomCode: asString(row.room_code),
       roomTitle: asString(row.room_title),
@@ -290,7 +320,9 @@ export class LocalDatabase {
       at: asNumber(row.at),
       createdAt: asNumber(row.created_at),
       hasPassword: row.password !== null && row.password !== undefined,
-      passwordFormat: asString(row.password_format) as 'safeStorage-v1' | 'plain-v0'
+      passwordFormat: asString(row.password_format) as 'safeStorage-v1' | 'plain-v0',
+      lobby: asNumber(row.lobby) === 1,
+      maxParticipants: asNumber(row.max_participants) || 8
     }));
   }
 

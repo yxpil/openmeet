@@ -28,6 +28,10 @@ const LEAD_MS = LEAD_ARG ? Number(LEAD_ARG.slice(7)) * 1000 : 95_000;
 const PASSWORD = 'openmeet-e2e';
 /** `--visible` skips the tray step, which separates wiring bugs from hidden-window bugs. */
 const KEEP_VISIBLE = process.argv.includes('--visible');
+/** `--return`: verify waiting out an ended meeting and returning when it reopens. */
+const RETURN_MODE = process.argv.includes('--return');
+/** `--invite`: a third client is launched from an openmeet:// link and must join by itself. */
+const INVITE_MODE = process.argv.includes('--invite');
 
 const DUMP_PREJOIN = `(() => {
   const value = (selector) => document.querySelector(selector)?.value;
@@ -142,6 +146,17 @@ async function attach(cdpPort) {
   };
 
   await send('Runtime.enable');
+  socket.addEventListener('message', (event) => {
+    const message = JSON.parse(String(event.data));
+    if (message.method === 'Runtime.exceptionThrown') {
+      const detail = message.params?.details;
+      log(
+        `  [page error] ${detail?.exceptionDetails?.text ?? ''} ${
+          detail?.exceptionDetails?.exception?.description ?? detail?.exceptionDetails?.value ?? ''
+        }`.slice(0, 400)
+      );
+    }
+  });
 
   // Driving helpers. textContent rather than innerText: a hidden window has no
   // layout, and innerText of an unlaid-out document comes back empty.
@@ -181,6 +196,12 @@ async function attach(cdpPort) {
       text() {
         return document.body.textContent || '';
       },
+      clickTitle(title) {
+        const button = document.querySelector('button[title="' + title + '"]');
+        if (!button) return '';
+        button.click();
+        return 'ok';
+      },
       names() {
         return [...document.querySelectorAll('.tile-name')].map((element) => element.textContent.trim());
       },
@@ -206,11 +227,11 @@ async function attach(cdpPort) {
   };
 }
 
-function launchClient(name, cdpPort) {
+function launchClient(name, cdpPort, extraArgs = []) {
   const userDataDir = mkdtempSync(join(tmpdir(), `openmeet-scheduled-${name}-`));
   const child = spawn(
     ELECTRON,
-    ['.', `--user-data-dir=${userDataDir}`, `--remote-debugging-port=${cdpPort}`],
+    ['.', `--user-data-dir=${userDataDir}`, `--remote-debugging-port=${cdpPort}`, ...extraArgs],
     { cwd: DESKTOP_DIR, stdio: ['ignore', 'ignore', 'pipe'], env: { ...process.env } }
   );
   let stderr = '';
@@ -285,6 +306,107 @@ function cleanup(...entries) {
   }
 }
 
+/** Join a room by code through the real 加入会议 dialog. */
+async function joinByCode(client, code, password) {
+  // Home's card reads '加入会议输入房间号与密码', so match on containment here.
+  await client.waitFor(`__om.click('加入会议')`, 15_000, 'join dialog');
+  await sleep(400);
+  const filledCode = await client.waitFor(`__om.set('房间号', ${JSON.stringify(code)})`, 10_000, 'code field');
+  if (filledCode !== 'ok') throw new Error(`房间号: ${filledCode}`);
+  await sleep(150);
+  if (password) {
+    const filledPassword = await client.waitFor(
+      `__om.set('房间密码', ${JSON.stringify(password)})`,
+      10_000,
+      'password field'
+    );
+    if (filledPassword !== 'ok') throw new Error(`房间密码: ${filledPassword}`);
+    await sleep(150);
+  }
+  await client.waitFor(`__om.clickExact('下一步')`, 10_000, 'next');
+  await client.waitFor(`!!document.querySelector('.prejoin-screen')`, 30_000, 'prejoin');
+  await client.waitFor(`__om.clickExact('加入会议')`, 20_000, 'join button');
+  await client.waitFor(`!!document.querySelector('.meeting-screen')`, 60_000, 'meeting screen');
+}
+
+/**
+ * #18/#19: the host ends the meeting, the guest waits it out, the host reopens
+ * the same code, and the guest must walk back in without touching anything.
+ */
+async function runReturnScenario(a, b) {
+  log('Alice opens a password room and enters');
+  await a.waitFor(`__om.click('发起会议')`, 15_000, 'create dialog');
+  await sleep(500);
+  await a.waitFor(`__om.set('会议主题', '自动返回验证')`, 10_000, 'title');
+  await a.waitFor(`__om.set('房间密码', ${JSON.stringify(ROOM_PASSWORD)})`, 10_000, 'password');
+  await a.waitFor(`__om.click('创建并进入')`, 10_000, 'create submit');
+  await a.waitFor(`!!document.querySelector('.prejoin-screen')`, 30_000, 'alice prejoin');
+  await a.waitFor(`__om.click('进入会议')`, 20_000, 'alice join');
+  await a.waitFor(`!!document.querySelector('.meeting-screen')`, 60_000, 'alice meeting');
+  const roomCode = await a.evaluate(
+    `document.querySelector('.meeting-code')?.textContent?.trim().replace(/[^A-Z0-9]/g,'') || ''`
+  );
+  if (!check('Alice holds an open room', typeof roomCode === 'string' && roomCode.length === 9, String(roomCode))) {
+    return;
+  }
+
+  log('Bob joins with the password');
+  await joinByCode(b, roomCode, ROOM_PASSWORD);
+  const together = await b.settle(`__om.names().includes('Alice') ? 'yes' : ''`, 30_000, 'Bob sees Alice');
+  check('both are in the meeting', together === 'yes');
+
+  log('Alice ends the meeting (the control opens a confirm panel)');
+  await a.waitFor(
+    `(() => { const button = document.querySelector('.control-button.danger'); if (!button) return ''; button.click(); return 'ok'; })()`,
+    10_000,
+    'end button'
+  );
+  await sleep(400);
+  await a.waitFor(
+    `(() => { const button = document.querySelector('.end-confirm .danger-button'); if (!button) return ''; button.click(); return 'ok'; })()`,
+    10_000,
+    'confirm end'
+  );
+  const endedCard = await b.settle(`!!document.querySelector('.ended-card')`, 25_000, 'Bob sees the end card');
+  check('Bob sees the meeting ended', Boolean(endedCard));
+  const waiting = await b.settle(`__om.text().includes('正在等待') ? 'yes' : ''`, 15_000, 'Bob started waiting');
+  check('Bob waits for the room to reopen, without clicking', waiting === 'yes');
+  const aliceWaiting = await a.evaluate(`__om.text().includes('正在等待') ? 'yes' : 'no'`);
+  check('the host who ended it is NOT left waiting', aliceWaiting === 'no', aliceWaiting);
+
+  log('Alice reopens the same room code');
+  await a.waitFor(`__om.click('返回首页')`, 15_000, 'alice back home');
+  await joinByCode(a, roomCode, ROOM_PASSWORD);
+  check('the server let the host reopen the same code', true);
+
+  const returned = await b.settle(
+    `!!document.querySelector('.meeting-screen') && !document.querySelector('.ended-layer')`,
+    120_000,
+    'Bob returned to a live meeting'
+  );
+  check('Bob returned to the reopened meeting with no clicks', Boolean(returned));
+  if (!returned) {
+    log(
+      '  bob still ended:',
+      JSON.stringify(
+        await b.evaluate(
+          `JSON.stringify({ card: document.querySelector('.ended-card h2')?.textContent ?? null, note: document.querySelector('.ended-layer .inline-note')?.textContent?.trim().slice(0,90) ?? null, prejoin: !!document.querySelector('.prejoin-screen'), prejoinError: document.querySelector('.form-error')?.textContent ?? null })`
+        )
+      )
+    );
+  }
+  const seesAgain = await b.settle(`__om.names().includes('Alice') ? 'yes' : ''`, 30_000, 'Bob sees Alice again');
+  check('both are together again', seesAgain === 'yes');
+  const stillWaiting = await b.evaluate(`__om.text().includes('正在等待') ? 'yes' : 'no'`);
+  if (stillWaiting === 'yes') {
+    const where = await b.evaluate(
+      `JSON.stringify({ endedLayer: !!document.querySelector('.ended-layer'), note: document.querySelector('.ended-layer .inline-note')?.textContent?.trim().slice(0,120) ?? null, inMeeting: !!document.querySelector('.meeting-screen'), prejoin: !!document.querySelector('.prejoin-screen') })`
+    );
+    log(`  still waiting: ${JSON.stringify(where)}`);
+  }
+  check('the waiting notice cleared itself after the return', stillWaiting === 'no', stillWaiting);
+}
+
 async function main() {
   log('starting server');
   const serverDataDir = mkdtempSync(join(tmpdir(), 'openmeet-scheduled-server-'));
@@ -324,6 +446,7 @@ async function main() {
   const alice = launchClient('alice', 9421);
   const bob = launchClient('bob', 9422);
   const clients = [];
+  const spawned = [alice, bob];
 
   try {
     await sleep(3000);
@@ -335,6 +458,48 @@ async function main() {
     await register(a, 'alice_e2e', 'Alice');
     await register(b, 'bob_e2e', 'Bob');
     check('both clients registered and reached home', true);
+
+    if (RETURN_MODE) {
+      await runReturnScenario(a, b);
+      return;
+    }
+
+    if (INVITE_MODE) {
+      log('Alice opens a room and copies her invite');
+      await a.waitFor(`__om.click('发起会议')`, 15_000, 'create dialog');
+      await sleep(500);
+      await a.waitFor(`__om.set('会议主题', '邀请免确认验证')`, 10_000, 'title');
+      await a.waitFor(`__om.click('创建并进入')`, 10_000, 'create submit');
+      await a.waitFor(`!!document.querySelector('.prejoin-screen')`, 30_000, 'alice prejoin');
+      await a.waitFor(`__om.click('进入会议')`, 20_000, 'alice join');
+      await a.waitFor(`!!document.querySelector('.meeting-screen')`, 60_000, 'alice meeting');
+      await a.waitFor(`__om.clickTitle('邀请成员')`, 15_000, 'invite dialog');
+      await sleep(400);
+      const inviteText = await a.evaluate(`document.querySelector('.invite-text')?.value ?? ''`);
+      if (!check('host invite text available', typeof inviteText === 'string' && inviteText.includes('OM1.'))) {
+        return;
+      }
+      await a.evaluate(`(() => { const button = document.querySelector('.invite-dialog .icon-button'); if (button) button.click(); return 'ok'; })()`);
+
+      log('a third client is launched straight from the openmeet:// link, with no account');
+      const link = `openmeet://join?invite=${encodeURIComponent(inviteText)}`;
+      const guest = launchClient('guest', 9423, [link]);
+      spawned.push(guest);
+      const c = await attach(9423);
+      clients.push(c);
+      const inMeeting = await c.settle(
+        `!!document.querySelector('.meeting-screen')`,
+        90_000,
+        'guest auto-joined from the link'
+      );
+      if (!inMeeting) log('  guest state:', JSON.stringify(await c.evaluate(DUMP_PREJOIN)));
+      check('the link took the guest into the meeting without a click', Boolean(inMeeting));
+      const seesHost = await c.settle(`__om.names().includes('Alice') ? 'yes' : ''`, 30_000, 'guest sees Alice');
+      check('the guest is actually in Alice’s room', seesHost === 'yes');
+      const hostSeesGuest = await a.settle(`__om.names().includes('访客') ? 'yes' : ''`, 30_000, 'Alice sees the guest');
+      check('the host sees the arriving guest', hostSeesGuest === 'yes');
+      return;
+    }
 
     log('Alice creates a password-protected room');
     await a.waitFor(`__om.click('发起会议')`, 15_000, 'create dialog');
@@ -457,7 +622,7 @@ async function main() {
         // socket already closed
       }
     }
-    cleanup(alice, bob);
+    cleanup(...spawned);
     try {
       server.kill();
     } catch {

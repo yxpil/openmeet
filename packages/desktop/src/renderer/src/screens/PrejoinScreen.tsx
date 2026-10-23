@@ -88,6 +88,8 @@ export default function PrejoinScreen(): React.JSX.Element {
     if (intent?.source === 'lan-host') return intent.lan.self.displayName;
     // A scheduled plan carries the name the user picked when booking it.
     if (intent?.source === 'server-code' && intent.displayName) return intent.displayName;
+    // The serverless dialog asks for a name up front; there is no account to fall back on.
+    if (intent?.source === 'lan-p2p') return intent.displayName;
     if (intent?.kind === 'server' && session && session.serverUrl === intent.serverUrl) {
       return session.user.displayName;
     }
@@ -124,12 +126,14 @@ export default function PrejoinScreen(): React.JSX.Element {
   const guestIntent = intent
     ? intent.source === 'server-code' ||
       intent.source === 'server-guest' ||
-      intent.source === 'lan-guest'
+      intent.source === 'lan-guest' ||
+      intent.source === 'lan-p2p'
     : false;
+  const isP2p = intent?.source === 'lan-p2p';
   const nameLocked =
     !guestIntent ||
     (intent?.kind === 'server' && Boolean(session && session.serverUrl === intent.serverUrl));
-  const showPassword = guestIntent;
+  const showPassword = guestIntent && !isP2p;
 
   const publishStream = (next: MediaStream) => {
     streamRef.current = next;
@@ -572,6 +576,13 @@ export default function PrejoinScreen(): React.JSX.Element {
             <div className="inline-note">
               <Wifi size={15} />
               将自动尝试 {endpoints.length} 个局域网地址（IPv4 / IPv6）
+            </div>
+          )}
+
+          {isP2p && (
+            <div className="inline-note">
+              <Wifi size={15} />
+              无服务器直连：同一网络内成员使用相同会议号与口令即可互相发现，口令不会出现在网络报文中。
             </div>
           )}
 

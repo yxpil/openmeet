@@ -32,6 +32,7 @@ import {
   normalizeServerUrl
 } from '@openmeet/shared';
 import type { InvitePayload } from '@openmeet/shared';
+import { P2P_CODE_PATTERN, normalizeP2pCode } from '../../../shared/p2p';
 import { useAppStore } from '../store/app';
 import { ApiRequestError, createRoom } from '../lib/api';
 import type { MeetingRecord } from '../../../shared/ipc';
@@ -99,6 +100,7 @@ export default function HomeScreen(): React.JSX.Element {
   const logout = useAppStore((state) => state.logout);
   const startServerHost = useAppStore((state) => state.startServerHost);
   const startLanHost = useAppStore((state) => state.startLanHost);
+  const openLanP2p = useAppStore((state) => state.openLanP2p);
   const openInviteText = useAppStore((state) => state.openInviteText);
   const openServerJoin = useAppStore((state) => state.openServerJoin);
   const toast = useAppStore((state) => state.toast);
@@ -121,6 +123,9 @@ export default function HomeScreen(): React.JSX.Element {
   const [inviteText, setInviteText] = useState('');
   const [scheduleDate, setScheduleDate] = useState('');
   const [scheduleTime, setScheduleTime] = useState('');
+  const [lanMode, setLanMode] = useState<'host' | 'p2p'>('host');
+  const [p2pCode, setP2pCode] = useState('');
+  const [p2pPassphrase, setP2pPassphrase] = useState('');
   const [clock, setClock] = useState(() => Date.now());
 
   const displayName = profileName || session?.user.displayName || 'OpenMeet 用户';
@@ -165,6 +170,9 @@ export default function HomeScreen(): React.JSX.Element {
     setDialIn('');
     setScheduleDate('');
     setScheduleTime('');
+    setLanMode('host');
+    setP2pCode('');
+    setP2pPassphrase('');
   };
 
   const openDialog = (kind: DialogKind) => {
@@ -240,6 +248,25 @@ export default function HomeScreen(): React.JSX.Element {
     }
   };
 
+  const handleP2pStart = () => {
+    const code = normalizeP2pCode(p2pCode);
+    if (!P2P_CODE_PATTERN.test(code)) {
+      setFormError('会议号需为 4–16 位字母或数字');
+      return;
+    }
+    if (p2pPassphrase.length < 1) {
+      setFormError('请填写口令，其它成员需要相同的会议号与口令');
+      return;
+    }
+    resetDialog();
+    openLanP2p({
+      code,
+      title: title.trim() || '局域网直连会议',
+      passphrase: p2pPassphrase,
+      displayName: hostName.trim() || displayName
+    });
+  };
+
   const handleJoin = (event: React.FormEvent) => {
     event.preventDefault();
     if (!session) {
@@ -307,7 +334,7 @@ export default function HomeScreen(): React.JSX.Element {
 
   const rejoin = (meeting: MeetingRecord) => {
     if (meeting.kind === 'lan') {
-      toast('info', '局域网会议需要主机重新发起并发送新邀请');
+      toast('info', '局域网会议不保留服务器房间：请重新发起，或用相同会议号与口令进入直连会议');
       return;
     }
     if (!session) {
@@ -442,7 +469,7 @@ export default function HomeScreen(): React.JSX.Element {
             </span>
             <div>
               <strong>局域网会议</strong>
-              <small>无需账号，同一网络内直连</small>
+              <small>本机主持，或无服务器直连</small>
             </div>
             <ArrowRight size={17} className="quick-arrow" />
           </button>
@@ -723,66 +750,140 @@ export default function HomeScreen(): React.JSX.Element {
             )}
 
             {dialog === 'lan' && (
-              <form className="modal-form" onSubmit={handleLanCreate}>
-                <div className="inline-note">
-                  <Wifi size={16} />
-                  主机会在本机启动临时会议服务，需保持 OpenMeet 在线；退出会议后服务关闭。
+              <form
+                className="modal-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (lanMode === 'p2p') handleP2pStart();
+                  else void handleLanCreate(event);
+                }}
+              >
+                <div className="mode-tabs">
+                  <button
+                    type="button"
+                    className={lanMode === 'host' ? 'active' : ''}
+                    onClick={() => setLanMode('host')}
+                  >
+                    由我主持
+                  </button>
+                  <button
+                    type="button"
+                    className={lanMode === 'p2p' ? 'active' : ''}
+                    onClick={() => setLanMode('p2p')}
+                  >
+                    无服务器直连
+                  </button>
                 </div>
-                <label className="field">
-                  <span className="field-label">会议主题</span>
-                  <input
-                    value={title}
-                    onChange={(event) => setTitle(event.target.value)}
-                    placeholder={`${hostName || displayName} 的局域网会议`}
-                    maxLength={80}
-                    autoFocus
-                  />
-                </label>
-                <label className="field">
-                  <span className="field-label">你的显示名称</span>
-                  <input
-                    value={hostName}
-                    onChange={(event) => setHostName(event.target.value)}
-                    maxLength={40}
-                  />
-                </label>
-                <label className="field">
-                  <span className="field-label">房间密码（可选）</span>
-                  <input
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    type="password"
-                    placeholder="4–64 个字符"
-                    minLength={4}
-                    maxLength={64}
-                  />
-                </label>
-                <div className="form-row">
-                  <label className="field">
-                    <span className="field-label">人数上限</span>
-                    <select
-                      value={maxParticipants}
-                      onChange={(event) => setMaxParticipants(Number(event.target.value))}
-                    >
-                      {[2, 4, 6, 8, 10, 12].map((value) => (
-                        <option key={value} value={value}>
-                          {value} 人
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="switch-field">
-                    <span>
-                      <strong>等候室</strong>
-                      <small>主持者手动准入</small>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={lobby}
-                      onChange={(event) => setLobby(event.target.checked)}
-                    />
-                  </label>
-                </div>
+
+                {lanMode === 'host' ? (
+                  <>
+                    <div className="inline-note">
+                      <Wifi size={16} />
+                      主机会在本机启动临时会议服务，需保持 OpenMeet 在线；退出会议后服务关闭。
+                    </div>
+                    <label className="field">
+                      <span className="field-label">会议主题</span>
+                      <input
+                        value={title}
+                        onChange={(event) => setTitle(event.target.value)}
+                        placeholder={`${hostName || displayName} 的局域网会议`}
+                        maxLength={80}
+                        autoFocus
+                      />
+                    </label>
+                    <label className="field">
+                      <span className="field-label">你的显示名称</span>
+                      <input
+                        value={hostName}
+                        onChange={(event) => setHostName(event.target.value)}
+                        maxLength={40}
+                      />
+                    </label>
+                    <label className="field">
+                      <span className="field-label">房间密码（可选）</span>
+                      <input
+                        value={password}
+                        onChange={(event) => setPassword(event.target.value)}
+                        type="password"
+                        placeholder="4–64 个字符"
+                        minLength={4}
+                        maxLength={64}
+                      />
+                    </label>
+                    <div className="form-row">
+                      <label className="field">
+                        <span className="field-label">人数上限</span>
+                        <select
+                          value={maxParticipants}
+                          onChange={(event) => setMaxParticipants(Number(event.target.value))}
+                        >
+                          {[2, 4, 6, 8, 10, 12].map((value) => (
+                            <option key={value} value={value}>
+                              {value} 人
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="switch-field">
+                        <span>
+                          <strong>等候室</strong>
+                          <small>主持者手动准入</small>
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={lobby}
+                          onChange={(event) => setLobby(event.target.checked)}
+                        />
+                      </label>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="inline-note">
+                      <Users size={16} />
+                      没有主持者也没有服务器：同一网络内的每台机器都填相同会议号与口令即可互相发现，
+                      任何一台离开都不影响其它人。口令只在本机参与派生房间标识，不会在网络上传输。
+                    </div>
+                    <label className="field">
+                      <span className="field-label">会议号（自行约定）</span>
+                      <input
+                        value={p2pCode}
+                        onChange={(event) => setP2pCode(event.target.value.toUpperCase())}
+                        placeholder="例如 OM7K2QD9"
+                        className="code-input"
+                        maxLength={16}
+                        autoFocus
+                      />
+                    </label>
+                    <label className="field">
+                      <span className="field-label">口令</span>
+                      <input
+                        value={p2pPassphrase}
+                        onChange={(event) => setP2pPassphrase(event.target.value)}
+                        type="password"
+                        placeholder="与成员口头约定，1–64 个字符"
+                        maxLength={64}
+                      />
+                    </label>
+                    <label className="field">
+                      <span className="field-label">你的显示名称</span>
+                      <input
+                        value={hostName}
+                        onChange={(event) => setHostName(event.target.value)}
+                        maxLength={40}
+                      />
+                    </label>
+                    <label className="field">
+                      <span className="field-label">会议主题（可选）</span>
+                      <input
+                        value={title}
+                        onChange={(event) => setTitle(event.target.value)}
+                        placeholder="仅显示在你自己的界面上"
+                        maxLength={80}
+                      />
+                    </label>
+                  </>
+                )}
                 {formError && <div className="form-error">{formError}</div>}
                 <div className="modal-actions">
                   <button type="button" className="ghost-button" onClick={resetDialog}>
@@ -790,7 +891,7 @@ export default function HomeScreen(): React.JSX.Element {
                   </button>
                   <button type="submit" className="primary-button" disabled={busy}>
                     {busy ? <Loader2 size={16} className="spin" /> : <Wifi size={16} />}
-                    创建局域网会议
+                    {lanMode === 'p2p' ? '进入直连会议' : '创建局域网会议'}
                   </button>
                 </div>
               </form>

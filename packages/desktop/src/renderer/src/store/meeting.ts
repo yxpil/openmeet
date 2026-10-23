@@ -18,7 +18,8 @@ import type {
 } from '@openmeet/shared';
 import { joinLanRoom, joinRoom } from '../lib/api';
 import { MeetingClient } from '../lib/meeting-client';
-import type { RemoteStreams } from '../lib/meeting-client';
+import type { MeetingTransport, RemoteStreams } from '../lib/meeting-client';
+import { LanP2pTransport } from '../lib/p2p-transport';
 import { useAppStore } from './app';
 import type { AppSettings, JoinIntent } from './app';
 
@@ -77,6 +78,8 @@ interface MeetingState {
   screenPickerOpen: boolean;
   invite: InvitePayload | null;
   inviteText: string | null;
+  /** True for serverless LAN meetings: nothing to invite with but code + passphrase. */
+  serverless: boolean;
   startedAt: number;
   join(intent: JoinIntent, options: JoinOptions): Promise<void>;
   leave(): void;
@@ -186,6 +189,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
   screenPickerOpen: false,
   invite: null,
   inviteText: null,
+  serverless: false,
   startedAt: 0,
 
   async join(intent, options) {
@@ -206,6 +210,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
     let isLanHost = false;
     let invite: InvitePayload | null = null;
     let inviteText: string | null = null;
+    let transport: MeetingTransport | null = null;
 
     if (intent.source === 'server-host') {
       response = intent.join;
@@ -231,6 +236,29 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
       serverUrl = null;
       wsUrl = makeWsUrl(outcome.endpoint);
       invite = intent.invite;
+    } else if (intent.source === 'lan-p2p') {
+      // No coordinator to ask for a ticket: the LAN mesh stands in for the
+      // server and produces the same welcome/roster messages afterwards.
+      const p2p = new LanP2pTransport({
+        code: intent.code,
+        passphrase: intent.passphrase,
+        displayName: options.displayName,
+        title: intent.title
+      });
+      transport = p2p;
+      response = {
+        ticket: 'lan-p2p',
+        room: p2p.roomView,
+        self: {
+          userId: null,
+          displayName: options.displayName,
+          guest: true,
+          host: false
+        },
+        ice: { iceServers: [], iceTransportPolicy: 'all' }
+      };
+      serverUrl = null;
+      wsUrl = '';
     } else {
       const refresh = () => useAppStore.getState().refreshAccessToken();
       const auth = useAuth && session ? { token: session.accessToken, refresh } : undefined;
@@ -307,6 +335,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
       screenPickerOpen: false,
       invite: invite ?? null,
       inviteText,
+      serverless: intent.source === 'lan-p2p',
       startedAt: Date.now()
     });
 
@@ -318,6 +347,7 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
       iceConfig: buildIceConfig(response.ice, app.settings),
       localStream: options.localStream,
       initialMediaState: initialMedia,
+      ...(transport ? { transport } : {}),
       callbacks: {
         onConnection(status, attempt) {
           if (status === 'reconnecting') {
@@ -530,7 +560,8 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
       activePanel: null,
       screenPickerOpen: false,
       invite: null,
-      inviteText: null
+      inviteText: null,
+      serverless: false
     });
     if (wasLanHost) void window.openmeet.lanStop();
     useAppStore.getState().returnHome();
@@ -651,7 +682,8 @@ export const useMeetingStore = create<MeetingState>((set, get) => ({
       media: { ...EMPTY_MEDIA },
       activePanel: null,
       invite: null,
-      inviteText: null
+      inviteText: null,
+      serverless: false
     });
     useAppStore.getState().returnHome();
   }

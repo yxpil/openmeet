@@ -1,7 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { createSocket } from 'node:dgram';
 import { P2pNode, deriveRoomId } from '../src/main/p2p-node.js';
-import { EMPTY_P2P_STATE } from '../src/shared/p2p.js';
+import { EMPTY_P2P_STATE, type P2pBeacon } from '../src/shared/p2p.js';
 
 const settle = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -30,15 +31,17 @@ describe('serverless LAN meeting node', () => {
     const signalsA: unknown[] = [];
     const signalsB: unknown[] = [];
     const chatsB: string[] = [];
-    // Fixed ports so each node can point its beacons at the other from the start.
-    // Loopback targets keep this test independent of LAN broadcast behaviour.
+    // Each node listens UDP on its own discovery port here so the test can aim
+    // beacons at loopback without depending on LAN broadcast behaviour. The
+    // beacon still carries the *signaling* port, which is what peers dial.
     const a = new P2pNode(
       {
         code: 'AAA-BBB-CCC',
         passphrase: 'shared',
         displayName: '甲',
         port: 45601,
-        directTargets: [{ address: '127.0.0.1', port: 45602 }]
+        discoveryPort: 45701,
+        directTargets: [{ address: '127.0.0.1', port: 45702 }]
       },
       { onSignal: (_from, data) => signalsA.push(data) }
     );
@@ -48,7 +51,8 @@ describe('serverless LAN meeting node', () => {
         passphrase: 'shared',
         displayName: '乙',
         port: 45602,
-        directTargets: [{ address: '127.0.0.1', port: 45601 }]
+        discoveryPort: 45702,
+        directTargets: [{ address: '127.0.0.1', port: 45701 }]
       },
       {
         onSignal: (_from, data) => signalsB.push(data),
@@ -90,7 +94,8 @@ describe('serverless LAN meeting node', () => {
       code: 'ZZZ-YYY-XXX',
       passphrase: 'correct',
       displayName: '主人',
-      port: 45603
+      port: 45603,
+      discoveryPort: 45703
     });
     const intruder = new P2pNode(
       {
@@ -98,7 +103,8 @@ describe('serverless LAN meeting node', () => {
         passphrase: 'guessed',
         displayName: '闯入者',
         port: 45604,
-        directTargets: [{ address: '127.0.0.1', port: 45603 }]
+        discoveryPort: 45704,
+        directTargets: [{ address: '127.0.0.1', port: 45703 }]
       },
       {}
     );
@@ -114,12 +120,49 @@ describe('serverless LAN meeting node', () => {
     }
   });
 
-  it('prunes a peer that vanishes without saying bye', async () => {
-    const keeper = new P2pNode({
+  it('beacons go to the shared discovery port and carry the signaling port', async () => {
+    // The invariant that used to be broken: nodes get ephemeral signaling ports,
+    // so a beacon sent to your own port would never be heard by anybody else.
+    const discoveryPort = 45921;
+    const heard: P2pBeacon[] = [];
+    const listener = createSocket({ type: 'udp4', reuseAddr: true });
+    await new Promise<void>((resolve, reject) => {
+      listener.once('error', reject);
+      listener.bind(discoveryPort, '0.0.0.0', () => {
+        listener.removeListener('error', reject);
+        resolve();
+      });
+    });
+    listener.on('message', (data) => {
+      try {
+        heard.push(JSON.parse(data.toString('utf8')) as P2pBeacon);
+      } catch {
+        // ignore unrelated traffic
+      }
+    });
+
+    const node = new P2pNode({ code: 'BEACON-TEST', passphrase: 'p', displayName: '甲', discoveryPort }, {});
+    try {
+      const signalingPort = await node.start();
+      await waitFor(() => heard.length > 0, 6000, 'a beacon on the shared discovery port');
+      const beacon = heard[0]!;
+      assert.equal(beacon.m, 'om-p2p');
+      assert.equal(beacon.kind, 'announce');
+      assert.equal(beacon.port, signalingPort, 'beacon must advertise the port peers dial');
+      assert.notEqual(beacon.port, discoveryPort);
+      assert.match(beacon.room, /^[0-9a-f]{32}$/);
+    } finally {
+      await node.close();
+      listener.close();
+    }
+  });
+
+  it('prunes a peer that vanishes without saying bye', async () => {    const keeper = new P2pNode({
       code: 'KKK-LLL-MMM',
       passphrase: 'p',
       displayName: '留守',
-      port: 45605
+      port: 45605,
+      discoveryPort: 45705
     });
     const flapper = new P2pNode(
       {
@@ -127,7 +170,8 @@ describe('serverless LAN meeting node', () => {
         passphrase: 'p',
         displayName: '短暂',
         port: 45606,
-        directTargets: [{ address: '127.0.0.1', port: 45605 }]
+        discoveryPort: 45706,
+        directTargets: [{ address: '127.0.0.1', port: 45705 }]
       },
       {}
     );

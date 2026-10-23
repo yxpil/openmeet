@@ -90,6 +90,15 @@ export type JoinIntent =
       endpoints: string[];
       inviteToken: string;
       invite: InvitePayload;
+    }
+  | {
+      /** Serverless LAN meeting: code + passphrase, no coordinator anywhere. */
+      source: 'lan-p2p';
+      kind: 'lan';
+      code: string;
+      title: string;
+      passphrase: string;
+      displayName: string;
     };
 
 export function intentTitle(intent: JoinIntent): string {
@@ -141,6 +150,7 @@ interface AppState {
   }): void;
   openInviteText(text: string): boolean;
   openInvite(invite: InvitePayload): void;
+  openLanP2p(options: { code: string; title: string; passphrase: string; displayName: string }): void;
   toast(kind: ToastKind, text: string, extra?: { action?: ToastAction; ttlMs?: number }): void;
   dismissToast(id: number): void;
   setSettingsOpen(open: boolean): void;
@@ -466,8 +476,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
-  toast(kind, text, extra) {
-    const id = ++toastSequence;
+  openLanP2p(options) {
+    set({
+      intent: {
+        source: 'lan-p2p',
+        kind: 'lan',
+        code: options.code,
+        title: options.title,
+        passphrase: options.passphrase,
+        displayName: options.displayName
+      },
+      screen: 'prejoin'
+    });
+  },
+
+  toast(kind, text, extra) {    const id = ++toastSequence;
     set({ toasts: [...get().toasts, { id, kind, text, action: extra?.action, ttlMs: extra?.ttlMs }] });
     window.setTimeout(() => get().dismissToast(id), extra?.ttlMs ?? 4600);
   },

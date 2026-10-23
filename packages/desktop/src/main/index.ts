@@ -28,6 +28,7 @@ import type {
   SessionSaveInput
 } from '../shared/ipc.js';
 import { LocalDatabase } from './local-db.js';
+import { P2pService } from './p2p-service.js';
 import { ScheduledJoinService } from './scheduled-service.js';
 import { createTray, showMainWindow, type TrayController } from './tray.js';
 
@@ -41,6 +42,7 @@ let pendingDeepLink: string | null = null;
 let selectedSourceId: string | null = null;
 let lanServer: RunningServer | null = null;
 let scheduled: ScheduledJoinService | null = null;
+let p2p: P2pService | null = null;
 let tray: TrayController | null = null;
 let lanStarting: Promise<RunningServer> | null = null;
 let quitting = false;
@@ -75,6 +77,10 @@ function requireString(value: unknown, max: number, min = 0): string {
   const text = value.trim();
   if (text.length < min || text.length > max) throw new Error('参数不合法');
   return text;
+}
+
+function liveWindows(): BrowserWindow[] {
+  return BrowserWindow.getAllWindows().filter((window) => !window.isDestroyed());
 }
 
 function optionalString(value: unknown, max: number): string | undefined {
@@ -446,6 +452,29 @@ function registerIpc(): void {
   ipcMain.handle(IPC.scheduledCancel, (_event, id: unknown) => {
     scheduled?.cancel(id);
   });
+
+  ipcMain.handle(IPC.p2pStart, async (_event, input: unknown) => {
+    if (!p2p) throw new Error('局域网直连尚未就绪');
+    return p2p.start(input);
+  });
+  ipcMain.handle(IPC.p2pStop, async () => {
+    await p2p?.stop();
+  });
+  ipcMain.handle(IPC.p2pSignal, (_event, to: unknown, data: unknown) => {
+    p2p?.signal(to, data);
+  });
+  ipcMain.handle(IPC.p2pChat, (_event, text: unknown, id: unknown, at: unknown) => {
+    p2p?.chat(text, id, at);
+  });
+  ipcMain.handle(IPC.p2pState, (_event, state: unknown) => {
+    p2p?.state(state);
+  });
+  ipcMain.handle(IPC.p2pHand, (_event, raised: unknown) => {
+    p2p?.hand(raised);
+  });
+  ipcMain.handle(IPC.p2pMute, (_event, target: unknown) => {
+    p2p?.mute(target);
+  });
   ipcMain.handle(IPC.lanStatus, () => getLanStatus());
   ipcMain.handle(IPC.lanStop, () => stopLanServer());
 
@@ -516,10 +545,9 @@ if (!app.requestSingleInstanceLock()) {
     configureSession();
     Menu.setApplicationMenu(null);
     createWindow();
-    scheduled = new ScheduledJoinService(localDb, () =>
-      BrowserWindow.getAllWindows().filter((window) => !window.isDestroyed())
-    );
+    scheduled = new ScheduledJoinService(localDb, liveWindows);
     scheduled.start();
+    p2p = new P2pService(liveWindows);
     if (keepRunningWhenClosed) {
       tray = createTray(
         () => showMainWindow(mainWindow),
@@ -550,6 +578,10 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', (event) => {
     const wasQuitting = quitting;
     quitting = true;
+    // Send the bye/leave frames first so peers drop us immediately instead of
+    // waiting for the peer timeout.
+    void p2p?.stop().catch(() => undefined);
+    p2p = null;
     if (wasQuitting || (!lanServer && !lanStarting)) return;
     event.preventDefault();
     const pending = lanStarting;

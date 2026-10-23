@@ -9,6 +9,12 @@
 
 export const P2P_PROTOCOL = 1;
 export const P2P_MULTICAST_V4 = '239.255.45.87';
+/**
+ * Shared UDP port for discovery. It must be the same on every machine: a beacon
+ * announces the (ephemeral) signaling port inside its payload, so listening and
+ * dialing can both work without any fixed signaling port.
+ */
+export const P2P_DISCOVERY_PORT = 45872;
 export const P2P_BEACON_INTERVAL_MS = 2000;
 /** A peer that stops beaconing for this long is considered gone. */
 export const P2P_PEER_TIMEOUT_MS = 7000;
@@ -64,3 +70,13 @@ export const EMPTY_P2P_STATE: P2pMediaState = {
   screen: false,
   handRaised: false
 };
+
+/**
+ * Serverless meeting codes are chosen by the people in the room, so they follow
+ * no server alphabet or length — only the shape both sides must agree on.
+ */
+export const P2P_CODE_PATTERN = /^[A-Z0-9]{4,16}$/;
+
+export function normalizeP2pCode(input: string): string {
+  return input.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}

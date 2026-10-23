@@ -4,6 +4,7 @@ import { networkInterfaces } from 'node:os';
 import { WebSocket, WebSocketServer } from 'ws';
 import {
   P2P_BEACON_INTERVAL_MS,
+  P2P_DISCOVERY_PORT,
   P2P_MULTICAST_V4,
   P2P_PEER_TIMEOUT_MS,
   P2P_PROTOCOL,
@@ -18,8 +19,10 @@ export interface P2pNodeOptions {
   code: string;
   passphrase: string;
   displayName: string;
-  /** Preferred UDP/TCP port; the node falls back to an ephemeral port. */
+  /** Preferred signaling port; the node falls back to an ephemeral port. */
   port?: number;
+  /** Shared UDP port every node on the LAN listens on for beacons. */
+  discoveryPort?: number;
   multicastGroup?: string;
   /** Injectable for tests: emit beacons to these addresses instead of LAN-wide. */
   directTargets?: { address: string; port: number }[];
@@ -68,10 +71,12 @@ function sameBytes(a: string, b: string): boolean {
 export class P2pNode {
   readonly peerId = `p_${randomUUID()}`;
   readonly roomId: string;
+  readonly discoveryPort: number;
   port = 0;
   private readonly options: P2pNodeOptions;
   private readonly events: P2pNodeEvents;
   private readonly peers = new Map<string, RemotePeer>();
+  private readonly pendingSignals = new Map<string, unknown[]>();
   private udp: Socket | null = null;
   private server: WebSocketServer | null = null;
   private beaconTimer: NodeJS.Timeout | null = null;
@@ -83,6 +88,7 @@ export class P2pNode {
   constructor(options: P2pNodeOptions, events: P2pNodeEvents = {}) {
     this.options = options;
     this.events = events;
+    this.discoveryPort = options.discoveryPort ?? P2P_DISCOVERY_PORT;
     this.roomId = deriveRoomId(options.code, options.passphrase);
   }
 
@@ -143,7 +149,7 @@ export class P2pNode {
       const socket = createSocket({ type: 'udp4', reuseAddr: true });
       this.udp = socket;
       socket.once('error', reject);
-      socket.bind(this.port, '0.0.0.0', () => {
+      socket.bind(this.discoveryPort, '0.0.0.0', () => {
         socket.removeListener('error', reject);
         try {
           socket.setBroadcast(true);
@@ -175,7 +181,7 @@ export class P2pNode {
   private announce(): void {
     if (!this.udp || this.closing) return;
     const payload = Buffer.from(JSON.stringify(this.beaconPayload('announce')), 'utf8');
-    const targets = this.options.directTargets ?? defaultTargets(this.port, this.options.multicastGroup);
+    const targets = this.options.directTargets ?? defaultTargets(this.discoveryPort, this.options.multicastGroup);
     for (const target of targets) {
       try {
         this.udp.send(payload, target.port, target.address);
@@ -260,10 +266,14 @@ export class P2pNode {
         name: this.options.displayName,
         state: this.state
       });
+      // A roster entry born from a beacon has no media state at all, so push ours
+      // as soon as the link is usable instead of waiting for the next toggle.
+      this.send(socket, { type: 'media', peerId: this.peerId, state: this.state });
       // Tell the other end about everyone else so the mesh closes.
       for (const known of this.peers.values()) {
         if (known.peerId !== peerId) this.send(socket, { type: 'referral', peer: this.infoOf(known) });
       }
+      this.flushSignals(peerId);
     });
     socket.on('message', (raw) => this.handleLink(peerId, raw, socket));
     socket.on('close', () => {
@@ -316,9 +326,11 @@ export class P2pNode {
           state: this.state,
           peers: this.roster.filter((item) => item.peerId !== peerId).map(this.infoOf)
         });
+        this.send(socket, { type: 'media', peerId: this.peerId, state: this.state });
         for (const known of this.peers.values()) {
           if (known.peerId !== peerId) this.broadcast({ type: 'referral', peer: this.infoOf(known) });
         }
+        this.flushSignals(peerId);
         this.events.onPeers?.(this.roster);
         return;
       }
@@ -449,6 +461,7 @@ export class P2pNode {
     const peer = this.peers.get(peerId);
     peer?.socket?.close();
     this.peers.delete(peerId);
+    this.pendingSignals.delete(peerId);
   }
 
   private pruneStale(): void {
@@ -479,8 +492,26 @@ export class P2pNode {
   /** Relay a WebRTC signal along the link to one peer (either direction). */
   signal(to: string, data: unknown): void {
     const peer = this.peers.get(to);
-    if (!peer) return;
+    if (!peer || !peer.socket) {
+      // Nothing orders an offer against the link that carries it, so an early
+      // signal is normal here. Dropping it would stall negotiation forever.
+      const queue = this.pendingSignals.get(to) ?? [];
+      if (queue.length < 128) queue.push(data);
+      this.pendingSignals.set(to, queue);
+      return;
+    }
     this.send(peer.socket, { type: 'signal', from: this.peerId, data });
+  }
+
+  private flushSignals(peerId: string): void {
+    const queued = this.pendingSignals.get(peerId);
+    if (!queued?.length) return;
+    this.pendingSignals.delete(peerId);
+    const peer = this.peers.get(peerId);
+    if (!peer?.socket) return;
+    for (const data of queued) {
+      this.send(peer.socket, { type: 'signal', from: this.peerId, data });
+    }
   }
 
   sendChat(text: string, id: string, at: number): void {
@@ -515,7 +546,7 @@ export class P2pNode {
     if (this.pruneTimer) clearInterval(this.pruneTimer);
     const bye = Buffer.from(JSON.stringify(this.beaconPayload('bye')), 'utf8');
     if (this.udp) {
-      for (const target of defaultTargets(this.port, this.options.multicastGroup)) {
+      for (const target of defaultTargets(this.discoveryPort, this.options.multicastGroup)) {
         try {
           this.udp.send(bye, target.port, target.address);
         } catch {

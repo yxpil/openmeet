@@ -13,6 +13,7 @@ export default function InviteDialog({ open, onClose }: InviteDialogProps): Reac
   const room = useMeetingStore((state) => state.room);
   const invite = useMeetingStore((state) => state.invite);
   const inviteText = useMeetingStore((state) => state.inviteText);
+  const serverless = useMeetingStore((state) => state.serverless);
   const session = useAppStore((state) => state.session);
   const toast = useAppStore((state) => state.toast);
   const [copied, setCopied] = useState<'invite' | 'code' | null>(null);
@@ -107,6 +108,11 @@ export default function InviteDialog({ open, onClose }: InviteDialogProps): Reac
             <span className="field-label">邀请内容</span>
             <textarea value={text} readOnly rows={6} className="invite-text" onFocus={(event) => event.target.select()} />
           </label>
+        ) : serverless ? (
+          <div className="inline-note">
+            无服务器直连没有邀请链接：请把房间号与口令用其它方式告诉成员，双方填相同的会议号与口令即可互相发现。
+            口令不会出现在任何网络报文中。
+          </div>
         ) : (
           <div className="inline-note">
             当前加入的会话没有邀请令牌。可以分享房间号，或请主持者复制完整邀请。

@@ -11,6 +11,9 @@ import type {
   LocalChatRecord,
   MeetingRecord,
   OpenMeetBridge,
+  P2pEvent,
+  P2pStartInput,
+  P2pStartResult,
   ScreenSource,
   SessionLoadResult,
   ScheduledCreateInput,
@@ -44,8 +47,14 @@ function bufferedListener<T>(channel: string, guard: (value: unknown) => value i
 const isString = (value: unknown): value is string => typeof value === 'string';
 const isScheduledEvent = (value: unknown): value is ScheduledJoinEvent =>
   typeof value === 'object' && value !== null && typeof (value as { id?: unknown }).id === 'string';
+const P2P_EVENT_KINDS = ['peers', 'signal', 'chat', 'left', 'fatal'] as const;
+const isP2pEvent = (value: unknown): value is P2pEvent =>
+  typeof value === 'object' &&
+  value !== null &&
+  (P2P_EVENT_KINDS as readonly string[]).includes((value as { kind?: string }).kind ?? '');
 
 const subscribeDeepLink = bufferedListener<string>(IPC.deepLink, isString);
+const subscribeP2pEvent = bufferedListener<P2pEvent>(IPC.p2pEvent, isP2pEvent);
 const subscribeScheduledJoin = bufferedListener<ScheduledJoinEvent>(IPC.scheduledJoin, isScheduledEvent);
 const subscribeScheduledReminder = bufferedListener<ScheduledJoinEvent>(
   IPC.scheduledReminder,
@@ -96,6 +105,15 @@ const bridge: OpenMeetBridge = {
   onScheduledJoin: (callback) => subscribeScheduledJoin(callback),
   onScheduledReminder: (callback) => subscribeScheduledReminder(callback),
   onScheduledMissed: (callback) => subscribeScheduledMissed(callback),
+  p2pStart: (input: P2pStartInput) =>
+    ipcRenderer.invoke(IPC.p2pStart, input) as Promise<P2pStartResult>,
+  p2pStop: () => ipcRenderer.invoke(IPC.p2pStop) as Promise<void>,
+  p2pSignal: (to, data) => ipcRenderer.invoke(IPC.p2pSignal, to, data) as Promise<void>,
+  p2pChat: (text, id, at) => ipcRenderer.invoke(IPC.p2pChat, text, id, at) as Promise<void>,
+  p2pState: (state) => ipcRenderer.invoke(IPC.p2pState, state) as Promise<void>,
+  p2pHand: (raised) => ipcRenderer.invoke(IPC.p2pHand, raised) as Promise<void>,
+  p2pMute: (target) => ipcRenderer.invoke(IPC.p2pMute, target) as Promise<void>,
+  onP2pEvent: (callback) => subscribeP2pEvent(callback),
   onDeepLink: (callback) => subscribeDeepLink(callback),
   onWindowState: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, state: { maximized: boolean }) => callback(state);

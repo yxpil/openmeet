@@ -61,7 +61,26 @@ export interface MeetingClientOptions {
   iceConfig: IceConfig;
   localStream: MediaStream | null;
   initialMediaState?: MediaState;
+  /**
+   * Replaces the server WebSocket with something else that speaks the same
+   * message protocol (serverless LAN mesh). When set, no socket is opened and
+   * the transport is responsible for emitting `welcome`.
+   */
+  transport?: MeetingTransport;
   callbacks: MeetingClientCallbacks;
+}
+
+export interface MeetingTransportHandlers {
+  onMessage(message: ServerMessage): void;
+  /** Terminal: the LAN mesh has no server to reconnect to. */
+  onClose(message?: string): void;
+}
+
+export interface MeetingTransport {
+  bind(handlers: MeetingTransportHandlers): void;
+  start(): Promise<void> | void;
+  send(message: ClientMessage): boolean;
+  close(): void;
 }
 
 interface PeerWrapper {
@@ -85,6 +104,8 @@ export class MeetingClient {
   private readonly options: MeetingClientOptions;
   private readonly callbacks: MeetingClientCallbacks;
   private ws: WebSocket | null = null;
+  private readonly transport: MeetingTransport | null;
+  private transportOpen = false;
   private peers = new Map<string, PeerWrapper>();
   private selfPeerId: string | null = null;
   private selfRole: Role = 'participant';
@@ -105,6 +126,7 @@ export class MeetingClient {
     this.options = options;
     this.callbacks = options.callbacks;
     this.localStream = options.localStream;
+    this.transport = options.transport ?? null;
     this.audioTrack = options.localStream?.getAudioTracks()[0] ?? null;
     this.cameraTrack = options.localStream?.getVideoTracks()[0] ?? null;
     this.media = {
@@ -125,11 +147,37 @@ export class MeetingClient {
   }
 
   connect(): void {
-    if (!this.ws) this.openSocket();
+    if (!this.ws && !this.transportOpen) this.openSocket();
   }
 
   private openSocket(): void {
     if (this.closedByUser || this.ended) return;
+    if (this.transport) {
+      const transport = this.transport;
+      this.callbacks.onConnection(
+        this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting',
+        this.reconnectAttempts
+      );
+      transport.bind({
+        onMessage: (message) => this.handleMessage(message),
+        onClose: (message) => {
+          if (this.closedByUser || this.ended) return;
+          this.transportOpen = false;
+          this.ended = true;
+          this.teardownPeers();
+          this.callbacks.onFatal(message ?? '局域网直连已断开');
+        }
+      });
+      // Ready to send before starting: the transport emits `welcome` from inside
+      // start(), and the media state that welcome triggers must not be dropped.
+      // The transport gates on its own readiness and returns false until then.
+      this.transportOpen = true;
+      void Promise.resolve(transport.start()).catch((error: unknown) => {
+        this.transportOpen = false;
+        this.callbacks.onFatal(error instanceof Error ? error.message : String(error));
+      });
+      return;
+    }
     this.callbacks.onConnection(
       this.reconnectAttempts > 0 ? 'reconnecting' : 'connecting',
       this.reconnectAttempts
@@ -222,6 +270,7 @@ export class MeetingClient {
   }
 
   private send(message: ClientMessage): boolean {
+    if (this.transport) return this.transportOpen ? this.transport.send(message) : false;
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
     try {
       this.ws.send(JSON.stringify(message));
@@ -694,6 +743,11 @@ export class MeetingClient {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.transport) {
+      this.transport.close();
+      this.transportOpen = false;
+      return;
     }
     const socket = this.ws;
     this.ws = null;

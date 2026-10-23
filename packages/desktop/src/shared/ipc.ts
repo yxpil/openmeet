@@ -5,6 +5,7 @@ import type {
   RoomView,
   User
 } from '@openmeet/shared';
+import type { P2pPeerInfo } from './p2p.js';
 
 export interface AppInfo {
   version: string;
@@ -158,6 +159,38 @@ export interface ScheduledJoinEvent extends ScheduledJoinRecord {
   passwordUnavailable?: boolean;
 }
 
+export interface P2pStartInput {
+  code: string;
+  passphrase: string;
+  displayName: string;
+  /** Prefer this port; the node falls back to an ephemeral one. */
+  port?: number;
+}
+
+export interface P2pStartResult {
+  peerId: string;
+  /** Room digest derived from code + passphrase; never the passphrase itself. */
+  roomId: string;
+  code: string;
+  displayName: string;
+  port: number;
+}
+
+/** One tagged stream instead of a channel per event, so ordering is preserved. */
+export type P2pEvent =
+  | { kind: 'peers'; peers: P2pPeerInfo[] }
+  | { kind: 'signal'; from: string; data: unknown }
+  | { kind: 'chat'; id: string; from: string; name: string; text: string; at: number }
+  | { kind: 'left'; peerId: string }
+  | { kind: 'fatal'; message: string };
+
+export interface P2pMediaPatch {
+  mic: boolean;
+  camera: boolean;
+  screen: boolean;
+  handRaised: boolean;
+}
+
 export interface OpenMeetBridge {
   appInfo(): Promise<AppInfo>;
   windowMinimize(): void;
@@ -191,6 +224,14 @@ export interface OpenMeetBridge {
   onScheduledJoin(callback: (event: ScheduledJoinEvent) => void): () => void;
   onScheduledReminder(callback: (event: ScheduledJoinEvent) => void): () => void;
   onScheduledMissed(callback: (event: ScheduledJoinEvent) => void): () => void;
+  p2pStart(input: P2pStartInput): Promise<P2pStartResult>;
+  p2pStop(): Promise<void>;
+  p2pSignal(to: string, data: unknown): Promise<void>;
+  p2pChat(text: string, id: string, at: number): Promise<void>;
+  p2pState(state: P2pMediaPatch): Promise<void>;
+  p2pHand(raised: boolean): Promise<void>;
+  p2pMute(target: string): Promise<void>;
+  onP2pEvent(callback: (event: P2pEvent) => void): () => void;
   onDeepLink(callback: (url: string) => void): () => void;
   onWindowState(callback: (state: { maximized: boolean }) => void): () => void;
 }
@@ -228,6 +269,14 @@ export const IPC = {
   scheduledJoin: 'scheduled:join',
   scheduledReminder: 'scheduled:reminder',
   scheduledMissed: 'scheduled:missed',
+  p2pStart: 'p2p:start',
+  p2pStop: 'p2p:stop',
+  p2pSignal: 'p2p:signal',
+  p2pChat: 'p2p:chat',
+  p2pState: 'p2p:state',
+  p2pHand: 'p2p:hand',
+  p2pMute: 'p2p:mute',
+  p2pEvent: 'p2p:event',
   deepLink: 'deep-link',
   windowState: 'window:state'
 } as const;

@@ -18,7 +18,7 @@
     "build:gateway": "npm run build --workspace @openmeet/gateway",
     "start:server": "npm run start --workspace @openmeet/server",
     "start:gateway": "npm run start --workspace @openmeet/gateway",
-    "test": "npm test --workspace @openmeet/server && npm test --workspace @openmeet/gateway",
+    "test": "npm test --workspace @openmeet/server && npm test --workspace @openmeet/gateway && npm test --workspace @openmeet/desktop",
     "typecheck": "npm run typecheck --workspace @openmeet/server && npm run typecheck --workspace @openmeet/desktop && npm run typecheck --workspace @openmeet/gateway",
     "package:win": "npm run package:win --workspace @openmeet/desktop"
   },
